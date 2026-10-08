@@ -75,6 +75,7 @@ const GNHF_REEXEC_STDIN_PROMPT = "GNHF_REEXEC_STDIN_PROMPT";
 const GNHF_REEXEC_STDIN_PROMPT_FILE = "GNHF_REEXEC_STDIN_PROMPT_FILE";
 const GNHF_REEXEC_STDIN_PROMPT_DIR_PREFIX = "gnhf-stdin-";
 const GNHF_REEXEC_STDIN_PROMPT_FILENAME = "prompt.txt";
+const GNHF_REEXEC_NEW_WORKTREE = "GNHF_REEXEC_NEW_WORKTREE";
 
 class PromptSignalError extends Error {
   constructor(public readonly signal: NodeJS.Signals) {
@@ -555,6 +556,15 @@ function readReexecStdinPrompt(env: NodeJS.ProcessEnv): string | undefined {
   return undefined;
 }
 
+function takeReexecNewWorktree(env: NodeJS.ProcessEnv): string | undefined {
+  const worktreePath = env[GNHF_REEXEC_NEW_WORKTREE];
+  delete env[GNHF_REEXEC_NEW_WORKTREE];
+  if (worktreePath === undefined || env.GNHF_SLEEP_INHIBITED !== "1") {
+    return undefined;
+  }
+  return resolve(worktreePath);
+}
+
 const program = new Command();
 
 program
@@ -700,6 +710,7 @@ program
       let effectiveCwd = cwd;
       let worktreePath: string | null = null;
       let worktreeCleanup: (() => void) | null = null;
+      let createdWorktreePath: string | null = null;
       let getOrchestratorState:
         | (() => ReturnType<Orchestrator["getState"]>)
         | null = null;
@@ -759,8 +770,11 @@ program
         runInfo = wt.runInfo;
         effectiveCwd = wt.effectiveCwd;
         worktreePath = wt.worktreePath;
+        const reexecNewWorktree = takeReexecNewWorktree(process.env);
+        const createdByReexecWrapper =
+          wt.resumed && reexecNewWorktree === resolve(wt.worktreePath);
 
-        if (wt.resumed) {
+        if (wt.resumed && !createdByReexecWrapper) {
           // Preserved worktree is always kept on exit regardless of this
           // invocation's commit count; previous commits are already there.
           effectiveStopWhen = runInfo.stopWhen;
@@ -775,6 +789,7 @@ program
               `\n  gnhf: continuing run ${runInfo.runId} from iteration ${startIteration}\n`,
           );
         } else {
+          createdWorktreePath = wt.worktreePath;
           worktreeCleanup = () => {
             try {
               removeWorktree(cwd, wt.worktreePath);
@@ -920,11 +935,20 @@ program
           const sleepPrevention =
             initialSleepPrevention ??
             (await startSleepPrevention(process.argv.slice(2), {
-              reexecEnv: persistedPrompt
-                ? {
-                    [GNHF_REEXEC_STDIN_PROMPT_FILE]: persistedPrompt.path,
-                  }
-                : undefined,
+              reexecEnv:
+                persistedPrompt || createdWorktreePath
+                  ? {
+                      ...(persistedPrompt
+                        ? {
+                            [GNHF_REEXEC_STDIN_PROMPT_FILE]:
+                              persistedPrompt.path,
+                          }
+                        : {}),
+                      ...(createdWorktreePath
+                        ? { [GNHF_REEXEC_NEW_WORKTREE]: createdWorktreePath }
+                        : {}),
+                    }
+                  : undefined,
             }));
           if (sleepPrevention.type === "reexeced") {
             reexeced = true;

@@ -3283,6 +3283,32 @@ describe("cli", () => {
     expect(createWorktree.mock.calls[1]?.[2]).toBe(`${firstBranch}-1`);
   });
 
+  it("tells a Linux sleep-prevention re-exec which worktree it just created", async () => {
+    const createWorktree = vi.fn();
+    const startSleepPrevention = vi.fn(() =>
+      Promise.resolve({ type: "skipped" as const, reason: "unsupported" }),
+    );
+
+    await runCliWithMocks(
+      ["ship it", "--worktree"],
+      {
+        agentPathOverride: {},
+        agentModel: {},
+        agentArgsOverride: {},
+        effort: "medium",
+        maxConsecutiveFailures: 3,
+        preventSleep: true,
+      },
+      { createWorktree, startSleepPrevention },
+    );
+
+    expect(startSleepPrevention).toHaveBeenCalledWith(expect.any(Array), {
+      reexecEnv: {
+        GNHF_REEXEC_NEW_WORKTREE: createWorktree.mock.calls[0]?.[1],
+      },
+    });
+  });
+
   it("queries git worktrees once when no preserved worktree exists", async () => {
     const listWorktreePaths = vi.fn(() => new Set());
 
