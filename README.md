@@ -48,7 +48,7 @@ You wake up to a branch full of clean work and a log of everything that happened
 - **Long running** - each iteration is committed on success and rolled back on failure, with sensible retries; [How It Works](#how-it-works) has the full failure-handling rules
 - **Live terminal title** - interactive runs keep your terminal title updated with live status, token totals, and commit count, then clear or restore it on exit depending on terminal support; token totals prefixed with `~` are estimates
 - **Exit summary** - every run ends with a permanent summary covering elapsed time, branch, iterations, tokens, branch diff stats, local notes/log paths, and review commands
-- **Built on Claude Code** - drives Anthropic's `claude` CLI in non-interactive mode; see [Agents](#agents) for requirements
+- **Built on Claude Code** - drives Anthropic's `claude` CLI in non-interactive mode, defaulting to Opus 5.5 (`claude-opus-5-5`) at medium effort; see [Agents](#agents) for requirements
 
 ## Quick Start
 
@@ -205,19 +205,20 @@ If you run `gnhf` on an existing `gnhf/` branch with a different prompt, gnhf as
 
 ### Flags
 
-| Flag                               | Description                                                                                        | Default            |
-| ---------------------------------- | -------------------------------------------------------------------------------------------------- | ------------------ |
-| `--model <model>`                  | Claude model; overrides `agentModel.claude` from the config file                                   | config file        |
-| `--max-iterations <n>`             | Abort after `n` total iterations                                                                   | unlimited          |
-| `--max-tokens <n>`                 | Abort after `n` total input+output+cache tokens                                                    | unlimited          |
-| `--max-rate-limit-wait <duration>` | Abort after this much total Claude usage-limit wait (`30m`, `2h`, or `0`)                          | 24h safety cap     |
-| `--stop-when <cond>`               | End when the agent reports this condition, after any commit-failure repair; persists across resume | unlimited          |
-| `--prevent-sleep <mode>`           | Prevent system sleep during the run (`on`/`off` or `true`/`false`)                                 | config file (`on`) |
-| `--worktree`                       | Run in a separate git worktree (enables multiple agents concurrently)                              | `false`            |
-| `--current-branch`                 | Run on the current branch instead of creating a `gnhf/` branch                                     | `false`            |
-| `--push`                           | Push the current branch after each successful iteration                                            | `false`            |
-| `--meteor-frequency <n>`           | Set TUI meteor frequency from 0 to 5 (`0` disables meteors)                                        | `3`                |
-| `--version`                        | Show version                                                                                       |                    |
+| Flag                               | Description                                                                                                   | Default                             |
+| ---------------------------------- | ------------------------------------------------------------------------------------------------------------- | ----------------------------------- |
+| `--model <model>`                  | Claude model; overrides `agentModel.claude` from the config file                                              | config file, else `claude-opus-5-5` |
+| `--effort <level>`                 | Claude reasoning effort (`low`, `medium`, `high`, `xhigh`, or `max`); overrides `effort` from the config file | config file (`medium`)              |
+| `--max-iterations <n>`             | Abort after `n` total iterations                                                                              | unlimited                           |
+| `--max-tokens <n>`                 | Abort after `n` total input+output+cache tokens                                                               | unlimited                           |
+| `--max-rate-limit-wait <duration>` | Abort after this much total Claude usage-limit wait (`30m`, `2h`, or `0`)                                     | 24h safety cap                      |
+| `--stop-when <cond>`               | End when the agent reports this condition, after any commit-failure repair; persists across resume            | unlimited                           |
+| `--prevent-sleep <mode>`           | Prevent system sleep during the run (`on`/`off` or `true`/`false`)                                            | config file (`on`)                  |
+| `--worktree`                       | Run in a separate git worktree (enables multiple agents concurrently)                                         | `false`                             |
+| `--current-branch`                 | Run on the current branch instead of creating a `gnhf/` branch                                                | `false`                             |
+| `--push`                           | Push the current branch after each successful iteration                                                       | `false`                             |
+| `--meteor-frequency <n>`           | Set TUI meteor frequency from 0 to 5 (`0` disables meteors)                                                   | `3`                                 |
+| `--version`                        | Show version                                                                                                  |                                     |
 
 ## Configuration
 
@@ -240,7 +241,7 @@ With the default configuration, it has this exact content:
 #     - --add-dir
 #     - ../shared-lib
 
-# Claude model (optional)
+# Claude model (optional, defaults to claude-opus-5-5)
 # agentModel:
 #   claude: sonnet
 
@@ -249,6 +250,9 @@ With the default configuration, it has this exact content:
 # Use Conventional Commits semantic-release headers:
 # commitMessage:
 #   preset: conventional
+
+# Claude reasoning effort: low, medium, high, xhigh, or max
+effort: medium
 
 # Abort after this many consecutive failures
 maxConsecutiveFailures: 3
@@ -260,11 +264,13 @@ preventSleep: true
 CLI flags override config file values. `--prevent-sleep` accepts `on`/`off` as well as `true`/`false`; the config file always uses a boolean.
 The iteration, token, and rate-limit-wait caps are runtime-only flags and are not persisted in `config.yml`; `--stop-when` is persisted per run for resume, but not in config.
 
+`effort` sets Claude's reasoning effort for every iteration and is passed as `claude --effort <level>`. Valid levels are `low`, `medium`, `high`, `xhigh`, and `max`; the default is `medium`, and `--effort` overrides it for a single run without changing `config.yml`.
+
 `agentArgsOverride.claude` passes extra flags through to the `claude` CLI.
 
-- Use it for Claude settings that lack a dedicated `gnhf` config field. Set a model with `agentModel.claude` in config or `--model <model>` for a run; `--model` wins.
+- Use it for Claude settings that lack a dedicated `gnhf` config field. Set a model with `agentModel.claude` in config or `--model <model>` for a run; `--model` wins. With neither set, gnhf passes `--model claude-opus-5-5`, unless `agentArgsOverride.claude` sets `--model` itself.
 - `gnhf` adds `--dangerously-skip-permissions` only when you do not provide your own permission flag (`--dangerously-skip-permissions`, `--permission-mode`, or `--permission-prompt-tool`). If you set one explicitly, `gnhf` treats that as user-managed and does not add its default on top.
-- Flags that `gnhf` manages itself (`-p`/`--print`, `--verbose`, `--output-format`, and `--json-schema`) are rejected during config loading so you get a clear error instead of duplicate-argument ambiguity.
+- Flags that `gnhf` manages itself (`-p`/`--print`, `--verbose`, `--output-format`, `--json-schema`, and `--effort`) are rejected during config loading so you get a clear error instead of duplicate-argument ambiguity. Set effort with the `effort` key or `--effort` instead.
 - Config files from earlier versions that name another agent (`agent: codex`, `agentModel.codex`, `acpRegistryOverrides`, and so on) are rejected with an error that names the key to remove. `agent: claude` is still accepted.
 
 `commitMessage` controls the subject line that gnhf uses for each successful iteration commit.
@@ -305,9 +311,9 @@ Set `GNHF_TELEMETRY=0` to turn it off.
 
 `gnhf` runs Claude Code only.
 
-| Agent       | Requirements                                        | Notes                                                                                                                                                                                                                        |
-| ----------- | --------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Claude Code | Install Anthropic's `claude` CLI and sign in first. | `gnhf` invokes `claude` directly in non-interactive mode. After Claude emits a successful structured result, `gnhf` treats that result as final and shuts down any lingering Claude process tree after a short grace period. |
+| Agent       | Requirements                                        | Notes                                                                                                                                                                                                                                                                                                      |
+| ----------- | --------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Claude Code | Install Anthropic's `claude` CLI and sign in first. | `gnhf` invokes `claude` directly in non-interactive mode with `--model claude-opus-5-5 --effort medium` unless you configure otherwise. After Claude emits a successful structured result, `gnhf` treats that result as final and shuts down any lingering Claude process tree after a short grace period. |
 
 ## Development
 

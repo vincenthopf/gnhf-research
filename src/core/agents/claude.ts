@@ -13,6 +13,8 @@ import {
   RateLimitAgentError,
 } from "./types.js";
 import { shutdownChildProcess } from "./managed-process.js";
+import { appendDebugLog } from "../debug-log.js";
+import type { EffortLevel } from "../effort.js";
 import {
   appendExitOutputTail,
   describeChildProcessExit,
@@ -70,6 +72,7 @@ type ClaudeEvent =
 
 interface ClaudeAgentDeps {
   bin?: string;
+  effort?: EffortLevel;
   extraArgs?: string[];
   finalResultGraceMs?: number;
   model?: string;
@@ -160,6 +163,7 @@ function buildClaudeArgs(
   schema: AgentOutputSchema,
   extraArgs?: string[],
   model?: string,
+  effort?: EffortLevel,
 ): string[] {
   const userArgs = (extraArgs ?? []).filter(
     (arg, index, args) =>
@@ -180,6 +184,7 @@ function buildClaudeArgs(
   return [
     ...userArgs,
     ...(model === undefined ? [] : ["--model", model]),
+    ...(effort === undefined ? [] : ["--effort", effort]),
     "-p",
     prompt,
     "--verbose",
@@ -248,6 +253,7 @@ export class ClaudeAgent implements Agent {
   name = "claude";
 
   private bin: string;
+  private effort?: EffortLevel;
   private extraArgs?: string[];
   private finalResultGraceMs: number;
   private model?: string;
@@ -257,6 +263,7 @@ export class ClaudeAgent implements Agent {
   constructor(binOrDeps: string | ClaudeAgentDeps = {}) {
     const deps = typeof binOrDeps === "string" ? { bin: binOrDeps } : binOrDeps;
     this.bin = deps.bin ?? "claude";
+    this.effort = deps.effort;
     this.extraArgs = deps.extraArgs;
     this.finalResultGraceMs =
       deps.finalResultGraceMs ?? DEFAULT_FINAL_RESULT_EXIT_GRACE_MS;
@@ -275,14 +282,17 @@ export class ClaudeAgent implements Agent {
 
     return new Promise((resolve, reject) => {
       const logStream = logPath ? createWriteStream(logPath) : null;
+      const model = options?.model ?? this.model;
 
+      appendDebugLog("claude:spawn", { model, effort: this.effort });
       const child = spawn(
         this.bin,
         buildClaudeArgs(
           prompt,
           this.schema,
           this.extraArgs,
-          options?.model ?? this.model,
+          model,
+          this.effort,
         ),
         {
           cwd,

@@ -66,7 +66,7 @@ gnhf \
   "<worker prompt>"
 ```
 
-Use `--model <model>` to select a Claude model for a run. For config defaults and restrictions, follow the README [Configuration](../../README.md#configuration).
+Use `--model <model>` and `--effort <level>` to select a Claude model and reasoning effort for a run; the defaults are `claude-opus-5-5` and `medium`. For config defaults and restrictions, follow the README [Configuration](../../README.md#configuration).
 
 Before launch:
 

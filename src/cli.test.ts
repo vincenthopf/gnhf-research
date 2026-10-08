@@ -375,6 +375,7 @@ async function runSigintCliTest({
       agentPathOverride: {},
       agentModel: {},
       agentArgsOverride: {},
+      effort: "medium",
       maxConsecutiveFailures: 3,
       preventSleep: false,
     })),
@@ -529,6 +530,7 @@ async function runCliResumeWithActualRun(
       ...(opts.liveCommitMessage === undefined
         ? {}
         : { commitMessage: opts.liveCommitMessage }),
+      effort: "medium",
       maxConsecutiveFailures: 3,
       preventSleep: false,
     })),
@@ -647,6 +649,7 @@ describe("cli", () => {
       agentArgsOverride: {
         claude: ["--add-dir", "../shared"],
       },
+      effort: "medium",
       maxConsecutiveFailures: 3,
       preventSleep: false,
     });
@@ -654,7 +657,7 @@ describe("cli", () => {
     expect(createAgent).toHaveBeenCalledWith(
       "/opt/bin/claude-wrapper",
       ["--add-dir", "../shared"],
-      { includeStopField: false },
+      { includeStopField: false, effort: "medium" },
     );
   });
 
@@ -663,12 +666,14 @@ describe("cli", () => {
       agentPathOverride: {},
       agentModel: { claude: "sonnet" },
       agentArgsOverride: {},
+      effort: "medium",
       maxConsecutiveFailures: 3,
       preventSleep: false,
     });
 
     expect(createAgent).toHaveBeenCalledWith(undefined, undefined, {
       includeStopField: false,
+      effort: "medium",
       model: "sonnet",
     });
 
@@ -676,14 +681,58 @@ describe("cli", () => {
       agentPathOverride: {},
       agentModel: { claude: "sonnet" },
       agentArgsOverride: {},
+      effort: "medium",
       maxConsecutiveFailures: 3,
       preventSleep: false,
     });
 
     expect(flagResult.createAgent).toHaveBeenCalledWith(undefined, undefined, {
       includeStopField: false,
+      effort: "medium",
       model: "opus",
     });
+  });
+
+  it("passes the configured effort to agent creation and lets --effort override it", async () => {
+    const config = {
+      agentPathOverride: {},
+      agentModel: {},
+      agentArgsOverride: {},
+      effort: "low" as const,
+      maxConsecutiveFailures: 3,
+      preventSleep: false,
+    };
+
+    const { createAgent, appendDebugLog } = await runCliWithMocks(
+      ["ship it"],
+      config,
+    );
+    expect(createAgent.mock.calls[0]?.[2]).toMatchObject({ effort: "low" });
+    expect(appendDebugLog).toHaveBeenCalledWith(
+      "run:start",
+      expect.objectContaining({ effort: "low" }),
+    );
+
+    const flagResult = await runCliWithMocks(
+      ["--effort", "xhigh", "ship it"],
+      config,
+    );
+    expect(flagResult.createAgent.mock.calls[0]?.[2]).toMatchObject({
+      effort: "xhigh",
+    });
+  });
+
+  it.each(["extreme", "", "HIGH"])("rejects --effort %j", async (effort) => {
+    await expect(
+      runCliWithMocks(["--effort", effort, "ship it"], {
+        agentPathOverride: {},
+        agentModel: {},
+        agentArgsOverride: {},
+        effort: "medium",
+        maxConsecutiveFailures: 3,
+        preventSleep: false,
+      }),
+    ).rejects.toThrow("process.exit unexpectedly called with 1");
   });
 
   it.each(["", "   "])("rejects blank --model values", async (model) => {
@@ -692,6 +741,7 @@ describe("cli", () => {
         agentPathOverride: {},
         agentModel: { claude: "sonnet" },
         agentArgsOverride: {},
+        effort: "medium",
         maxConsecutiveFailures: 3,
         preventSleep: false,
       }),
@@ -705,6 +755,7 @@ describe("cli", () => {
         agentPathOverride: {},
         agentModel: {},
         agentArgsOverride: {},
+        effort: "medium",
         maxConsecutiveFailures: 3,
         preventSleep: false,
       },
@@ -755,6 +806,7 @@ describe("cli", () => {
           agentPathOverride: {},
           agentModel: {},
           agentArgsOverride: {},
+          effort: "medium",
           maxConsecutiveFailures: 3,
           preventSleep: false,
         },
@@ -784,6 +836,7 @@ describe("cli", () => {
         agentPathOverride: {},
         agentModel: {},
         agentArgsOverride: {},
+        effort: "medium",
         maxConsecutiveFailures: 3,
         preventSleep: false,
       },
@@ -791,6 +844,7 @@ describe("cli", () => {
 
     expect(createAgent).toHaveBeenCalledWith(undefined, undefined, {
       includeStopField: true,
+      effort: "medium",
       stopWhen: "all tests pass",
     });
   });
@@ -801,6 +855,7 @@ describe("cli", () => {
       agentModel: {},
       agentArgsOverride: {},
       commitMessage: CONVENTIONAL_COMMIT_MESSAGE,
+      effort: "medium",
       maxConsecutiveFailures: 3,
       preventSleep: false,
     });
@@ -833,11 +888,10 @@ describe("cli", () => {
       process.cwd(),
       expectedSchemaOptions,
     );
-    expect(createAgent).toHaveBeenCalledWith(
-      undefined,
-      undefined,
-      expectedSchemaOptions,
-    );
+    expect(createAgent).toHaveBeenCalledWith(undefined, undefined, {
+      ...expectedSchemaOptions,
+      effort: "medium",
+    });
   });
 
   it("combines stop-when and commit message fields in schema options", async () => {
@@ -848,6 +902,7 @@ describe("cli", () => {
         agentModel: {},
         agentArgsOverride: {},
         commitMessage: CONVENTIONAL_COMMIT_MESSAGE,
+        effort: "medium",
         maxConsecutiveFailures: 3,
         preventSleep: false,
       },
@@ -882,11 +937,10 @@ describe("cli", () => {
       process.cwd(),
       expectedSchemaOptions,
     );
-    expect(createAgent).toHaveBeenCalledWith(
-      undefined,
-      undefined,
-      expectedSchemaOptions,
-    );
+    expect(createAgent).toHaveBeenCalledWith(undefined, undefined, {
+      ...expectedSchemaOptions,
+      effort: "medium",
+    });
   });
 
   it("reuses the persisted stop-when condition when resuming without --stop-when", async () => {
@@ -898,6 +952,7 @@ describe("cli", () => {
     );
     expect(createAgent).toHaveBeenCalledWith(undefined, undefined, {
       includeStopField: true,
+      effort: "medium",
       stopWhen: "all tests pass",
     });
     expect(orchestratorCtor.mock.calls[0]?.[6]).toMatchObject({
@@ -959,6 +1014,7 @@ describe("cli", () => {
     );
     expect(createAgent).toHaveBeenCalledWith(undefined, undefined, {
       includeStopField: false,
+      effort: "medium",
     });
     expect(orchestratorCtor.mock.calls[0]?.[6]).toEqual({
       maxIterations: undefined,
@@ -983,6 +1039,7 @@ describe("cli", () => {
     );
     expect(createAgent).toHaveBeenCalledWith(undefined, undefined, {
       includeStopField: false,
+      effort: "medium",
     });
     expect(orchestratorCtor.mock.calls[0]?.[0]).toMatchObject({
       commitMessage: undefined,
@@ -1007,6 +1064,7 @@ describe("cli", () => {
       undefined,
       expect.objectContaining({
         includeStopField: false,
+        effort: "medium",
         commitFields: expect.arrayContaining([
           expect.objectContaining({ name: "type" }),
           expect.objectContaining({ name: "scope" }),
@@ -1035,6 +1093,7 @@ describe("cli", () => {
         agentPathOverride: {},
         agentModel: {},
         agentArgsOverride: {},
+        effort: "medium",
         maxConsecutiveFailures: 3,
         preventSleep: false,
       },
@@ -1056,6 +1115,7 @@ describe("cli", () => {
         agentPathOverride: {},
         agentModel: {},
         agentArgsOverride: {},
+        effort: "medium",
         maxConsecutiveFailures: 3,
         preventSleep: false,
       },
@@ -1075,6 +1135,7 @@ describe("cli", () => {
       agentPathOverride: {},
       agentModel: {},
       agentArgsOverride: {},
+      effort: "medium",
       maxConsecutiveFailures: 3,
       preventSleep: false,
     });
@@ -1096,6 +1157,7 @@ describe("cli", () => {
         agentPathOverride: {},
         agentModel: {},
         agentArgsOverride: {},
+        effort: "medium",
         maxConsecutiveFailures: 3,
         preventSleep: false,
       },
@@ -1110,6 +1172,7 @@ describe("cli", () => {
       agentPathOverride: {},
       agentModel: {},
       agentArgsOverride: {},
+      effort: "medium",
       maxConsecutiveFailures: 3,
       preventSleep: false,
     });
@@ -1123,6 +1186,7 @@ describe("cli", () => {
       agentPathOverride: {},
       agentModel: {},
       agentArgsOverride: {},
+      effort: "medium",
       maxConsecutiveFailures: 3,
       preventSleep: false,
     });
@@ -1141,6 +1205,7 @@ describe("cli", () => {
         agentPathOverride: {},
         agentModel: {},
         agentArgsOverride: {},
+        effort: "medium",
         maxConsecutiveFailures: 3,
         preventSleep: false,
       },
@@ -1182,6 +1247,7 @@ describe("cli", () => {
           agentPathOverride: {},
           agentModel: {},
           agentArgsOverride: {},
+          effort: "medium",
           maxConsecutiveFailures: 3,
           preventSleep: false,
         },
@@ -1234,6 +1300,7 @@ describe("cli", () => {
           agentPathOverride: {},
           agentModel: {},
           agentArgsOverride: {},
+          effort: "medium",
           maxConsecutiveFailures: 3,
           preventSleep: false,
         },
@@ -1256,6 +1323,7 @@ describe("cli", () => {
         agentPathOverride: {},
         agentModel: {},
         agentArgsOverride: {},
+        effort: "medium",
         maxConsecutiveFailures: 3,
         preventSleep: false,
       }),
@@ -1268,6 +1336,7 @@ describe("cli", () => {
         agentPathOverride: {},
         agentModel: {},
         agentArgsOverride: {},
+        effort: "medium",
         maxConsecutiveFailures: 3,
         preventSleep: false,
       });
@@ -1279,6 +1348,7 @@ describe("cli", () => {
       agentPathOverride: {},
       agentModel: {},
       agentArgsOverride: {},
+      effort: "medium",
       maxConsecutiveFailures: 3,
       preventSleep: false,
     });
@@ -1299,6 +1369,7 @@ describe("cli", () => {
         agentPathOverride: {},
         agentModel: {},
         agentArgsOverride: {},
+        effort: "medium",
         maxConsecutiveFailures: 3,
         preventSleep: true,
       },
@@ -1324,6 +1395,7 @@ describe("cli", () => {
         agentPathOverride: {},
         agentModel: {},
         agentArgsOverride: {},
+        effort: "medium",
         maxConsecutiveFailures: 3,
         preventSleep: true,
       },
@@ -1357,6 +1429,7 @@ describe("cli", () => {
         agentPathOverride: {},
         agentModel: {},
         agentArgsOverride: {},
+        effort: "medium",
         maxConsecutiveFailures: 3,
         preventSleep: true,
       },
@@ -1382,6 +1455,7 @@ describe("cli", () => {
           agentPathOverride: {},
           agentModel: {},
           agentArgsOverride: {},
+          effort: "medium",
           maxConsecutiveFailures: 3,
           preventSleep: true,
         },
@@ -1415,6 +1489,7 @@ describe("cli", () => {
         agentPathOverride: {},
         agentModel: {},
         agentArgsOverride: {},
+        effort: "medium",
         maxConsecutiveFailures: 3,
         preventSleep: true,
       },
@@ -1450,6 +1525,7 @@ describe("cli", () => {
           agentPathOverride: {},
           agentModel: {},
           agentArgsOverride: {},
+          effort: "medium",
           maxConsecutiveFailures: 3,
           preventSleep: true,
         },
@@ -1490,6 +1566,7 @@ describe("cli", () => {
         agentPathOverride: {},
         agentModel: {},
         agentArgsOverride: {},
+        effort: "medium",
         maxConsecutiveFailures: 3,
         preventSleep: true,
       },
@@ -1532,6 +1609,7 @@ describe("cli", () => {
           agentPathOverride: {},
           agentModel: {},
           agentArgsOverride: {},
+          effort: "medium",
           maxConsecutiveFailures: 3,
           preventSleep: true,
         },
@@ -1568,6 +1646,7 @@ describe("cli", () => {
           agentPathOverride: {},
           agentModel: {},
           agentArgsOverride: {},
+          effort: "medium",
           maxConsecutiveFailures: 3,
           preventSleep: true,
         },
@@ -1599,6 +1678,7 @@ describe("cli", () => {
       agentPathOverride: {},
       agentModel: {},
       agentArgsOverride: {},
+      effort: "medium",
       maxConsecutiveFailures: 3,
       preventSleep: true,
     }));
@@ -1765,6 +1845,7 @@ describe("cli", () => {
         agentPathOverride: {},
         agentModel: {},
         agentArgsOverride: {},
+        effort: "medium",
         maxConsecutiveFailures: 3,
         preventSleep: true,
       })),
@@ -1900,6 +1981,7 @@ describe("cli", () => {
         agentPathOverride: {},
         agentModel: {},
         agentArgsOverride: {},
+        effort: "medium",
         maxConsecutiveFailures: 3,
         preventSleep: true,
       })),
@@ -2031,6 +2113,7 @@ describe("cli", () => {
         agentPathOverride: {},
         agentModel: {},
         agentArgsOverride: {},
+        effort: "medium",
         maxConsecutiveFailures: 3,
         preventSleep: true,
       })),
@@ -2157,6 +2240,7 @@ describe("cli", () => {
         agentPathOverride: {},
         agentModel: {},
         agentArgsOverride: {},
+        effort: "medium",
         maxConsecutiveFailures: 3,
         preventSleep: true,
       })),
@@ -2280,6 +2364,7 @@ describe("cli", () => {
         agentPathOverride: {},
         agentModel: {},
         agentArgsOverride: {},
+        effort: "medium",
         maxConsecutiveFailures: 3,
         preventSleep: true,
       })),
@@ -2396,6 +2481,7 @@ describe("cli", () => {
         agentPathOverride: {},
         agentModel: {},
         agentArgsOverride: {},
+        effort: "medium",
         maxConsecutiveFailures: 3,
         preventSleep: false,
       })),
@@ -2516,6 +2602,7 @@ describe("cli", () => {
         agentPathOverride: {},
         agentModel: {},
         agentArgsOverride: {},
+        effort: "medium",
         maxConsecutiveFailures: 3,
         preventSleep: false,
       },
@@ -2573,6 +2660,7 @@ describe("cli", () => {
         agentPathOverride: {},
         agentModel: {},
         agentArgsOverride: {},
+        effort: "medium",
         maxConsecutiveFailures: 3,
         preventSleep: false,
       })),
@@ -2718,6 +2806,7 @@ describe("cli", () => {
         agentPathOverride: {},
         agentModel: {},
         agentArgsOverride: {},
+        effort: "medium",
         maxConsecutiveFailures: 3,
         preventSleep: false,
       })),
@@ -2822,6 +2911,7 @@ describe("cli", () => {
         agentPathOverride: {},
         agentModel: {},
         agentArgsOverride: {},
+        effort: "medium",
         maxConsecutiveFailures: 3,
         preventSleep: false,
       },
@@ -2889,6 +2979,7 @@ describe("cli", () => {
         agentPathOverride: {},
         agentModel: {},
         agentArgsOverride: {},
+        effort: "medium",
         maxConsecutiveFailures: 3,
         preventSleep: false,
       })),
@@ -3040,6 +3131,7 @@ describe("cli", () => {
         agentPathOverride: {},
         agentModel: {},
         agentArgsOverride: {},
+        effort: "medium",
         maxConsecutiveFailures: 3,
         preventSleep: false,
       })),
@@ -3151,6 +3243,7 @@ describe("cli", () => {
         agentPathOverride: {},
         agentModel: {},
         agentArgsOverride: {},
+        effort: "medium",
         maxConsecutiveFailures: 3,
         preventSleep: false,
       },
@@ -3176,6 +3269,7 @@ describe("cli", () => {
         agentPathOverride: {},
         agentModel: {},
         agentArgsOverride: {},
+        effort: "medium",
         maxConsecutiveFailures: 3,
         preventSleep: false,
       },
@@ -3198,6 +3292,7 @@ describe("cli", () => {
         agentPathOverride: {},
         agentModel: {},
         agentArgsOverride: {},
+        effort: "medium",
         maxConsecutiveFailures: 3,
         preventSleep: false,
       },
@@ -3216,6 +3311,7 @@ describe("cli", () => {
         agentPathOverride: {},
         agentModel: {},
         agentArgsOverride: {},
+        effort: "medium",
         maxConsecutiveFailures: 3,
         preventSleep: false,
       },
@@ -3264,6 +3360,7 @@ describe("cli", () => {
           agentPathOverride: {},
           agentModel: {},
           agentArgsOverride: {},
+          effort: "medium",
           maxConsecutiveFailures: 3,
           preventSleep: false,
         },
@@ -3361,6 +3458,7 @@ describe("cli", () => {
           agentPathOverride: {},
           agentModel: {},
           agentArgsOverride: {},
+          effort: "medium",
           maxConsecutiveFailures: 3,
           preventSleep: false,
         },
@@ -3416,6 +3514,7 @@ describe("cli", () => {
           agentPathOverride: {},
           agentModel: {},
           agentArgsOverride: {},
+          effort: "medium",
           maxConsecutiveFailures: 3,
           preventSleep: false,
         },
@@ -3435,6 +3534,7 @@ describe("cli", () => {
       });
       expect(createAgent.mock.calls[0]?.[2]).toEqual({
         includeStopField: false,
+        effort: "medium",
       });
       expect(orchestratorCtor.mock.calls[0]?.[6]).toEqual({
         maxIterations: undefined,
@@ -3479,6 +3579,7 @@ describe("cli", () => {
           agentPathOverride: {},
           agentModel: {},
           agentArgsOverride: {},
+          effort: "medium",
           maxConsecutiveFailures: 3,
           preventSleep: false,
         },
@@ -3534,6 +3635,7 @@ describe("cli", () => {
           agentPathOverride: {},
           agentModel: {},
           agentArgsOverride: {},
+          effort: "medium",
           maxConsecutiveFailures: 3,
           preventSleep: false,
           commitMessage: CONVENTIONAL_COMMIT_MESSAGE,
@@ -3550,6 +3652,7 @@ describe("cli", () => {
 
       expect(createAgent.mock.calls[0]?.[2]).toEqual({
         includeStopField: false,
+        effort: "medium",
       });
       expect(orchestratorCtor.mock.calls[0]?.[0]).toEqual(
         expect.objectContaining({ commitMessage: undefined }),

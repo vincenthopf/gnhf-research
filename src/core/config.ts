@@ -5,6 +5,12 @@ import yaml from "js-yaml";
 import type { CommitMessageConfig } from "./commit-message.js";
 import { normalizeCommitMessageConfig } from "./commit-message-config.js";
 import { InvalidConfigError } from "./config-errors.js";
+import {
+  DEFAULT_EFFORT,
+  EFFORT_LEVEL_LIST,
+  isEffortLevel,
+  type EffortLevel,
+} from "./effort.js";
 
 export const AGENT_NAMES = ["claude"] as const;
 
@@ -14,6 +20,7 @@ export interface Config {
   agentModel: Partial<Record<AgentName, string>>;
   agentPathOverride: Partial<Record<AgentName, string>>;
   agentArgsOverride: Partial<Record<AgentName, string[]>>;
+  effort: EffortLevel;
   commitMessage?: CommitMessageConfig;
   maxConsecutiveFailures: number;
   preventSleep: boolean;
@@ -23,6 +30,7 @@ const DEFAULT_CONFIG: Config = {
   agentModel: {},
   agentPathOverride: {},
   agentArgsOverride: {},
+  effort: DEFAULT_EFFORT,
   maxConsecutiveFailures: 3,
   preventSleep: true,
 };
@@ -55,6 +63,10 @@ function normalizePreventSleep(value: unknown): boolean | undefined {
   return undefined;
 }
 
+function isEffortArg(arg: string): boolean {
+  return arg === "--effort" || arg.startsWith("--effort=");
+}
+
 function isReservedAgentArg(arg: string): boolean {
   return (
     arg === "-p" ||
@@ -63,7 +75,8 @@ function isReservedAgentArg(arg: string): boolean {
     arg === "--output-format" ||
     arg.startsWith("--output-format=") ||
     arg === "--json-schema" ||
-    arg.startsWith("--json-schema=")
+    arg.startsWith("--json-schema=") ||
+    isEffortArg(arg)
   );
 }
 
@@ -156,6 +169,12 @@ function normalizeAgentExtraArgs(
       );
     }
 
+    if (isEffortArg(trimmed)) {
+      throw new InvalidConfigError(
+        `Invalid config value for ${label}[${index}]: "${trimmed}" is managed by gnhf. Set effort in ~/.gnhf/config.yml or pass --effort instead.`,
+      );
+    }
+
     if (isReservedAgentArg(trimmed)) {
       throw new InvalidConfigError(
         `Invalid config value for ${label}[${index}]: "${trimmed}" is managed by gnhf and cannot be overridden`,
@@ -227,6 +246,13 @@ function normalizeAgentModel(
   }
 
   return Object.keys(result).length === 0 ? undefined : result;
+}
+
+function normalizeEffort(value: unknown): EffortLevel {
+  if (isEffortLevel(value)) return value;
+  throw new InvalidConfigError(
+    `Invalid config value for effort: ${JSON.stringify(value)}. Use ${EFFORT_LEVEL_LIST}.`,
+  );
 }
 
 type RawConfig = Partial<Config> & {
@@ -314,6 +340,10 @@ function normalizeConfig(
     }
   } else {
     delete normalized.agentModel;
+  }
+
+  if (Object.prototype.hasOwnProperty.call(config, "effort")) {
+    normalized.effort = normalizeEffort(config.effort);
   }
 
   const hasCommitMessage = Object.prototype.hasOwnProperty.call(
@@ -411,7 +441,7 @@ function serializeConfig(config: Config): string {
     "#     - --add-dir",
     "#     - ../shared-lib",
     "",
-    "# Claude model (optional)",
+    "# Claude model (optional, defaults to claude-opus-5-5)",
     "# agentModel:",
     "#   claude: sonnet",
     "",
@@ -435,6 +465,9 @@ function serializeConfig(config: Config): string {
   }
 
   lines.push(
+    "",
+    `# Claude reasoning effort: ${EFFORT_LEVEL_LIST}`,
+    `effort: ${config.effort}`,
     "",
     "# Abort after this many consecutive failures",
     `maxConsecutiveFailures: ${config.maxConsecutiveFailures}`,

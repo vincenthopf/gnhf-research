@@ -64,6 +64,7 @@ const config: Config = {
   agentPathOverride: {},
   agentModel: {},
   agentArgsOverride: {},
+  effort: "medium",
   maxConsecutiveFailures: 3,
   preventSleep: true,
 };

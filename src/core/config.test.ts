@@ -57,6 +57,7 @@ describe("loadConfig", () => {
       agentPathOverride: {},
       agentModel: {},
       agentArgsOverride: {},
+      effort: "medium",
       maxConsecutiveFailures: 3,
       preventSleep: true,
     });
@@ -79,6 +80,7 @@ describe("loadConfig", () => {
       agentPathOverride: {},
       agentModel: {},
       agentArgsOverride: {},
+      effort: "medium",
       maxConsecutiveFailures: 3,
       preventSleep: true,
     });
@@ -110,6 +112,7 @@ describe("loadConfig", () => {
       },
       agentModel: {},
       agentArgsOverride: {},
+      effort: "medium",
       maxConsecutiveFailures: 3,
       preventSleep: true,
     });
@@ -182,6 +185,7 @@ describe("loadConfig", () => {
       agentPathOverride: {},
       agentModel: {},
       agentArgsOverride: {},
+      effort: "medium",
       maxConsecutiveFailures: 10,
       preventSleep: true,
     });
@@ -196,6 +200,7 @@ describe("loadConfig", () => {
       agentPathOverride: {},
       agentModel: {},
       agentArgsOverride: {},
+      effort: "medium",
       maxConsecutiveFailures: 3,
       preventSleep: false,
     });
@@ -210,6 +215,7 @@ describe("loadConfig", () => {
       agentPathOverride: {},
       agentModel: {},
       agentArgsOverride: {},
+      effort: "medium",
       maxConsecutiveFailures: 3,
       preventSleep: false,
     });
@@ -224,6 +230,7 @@ describe("loadConfig", () => {
       agentPathOverride: {},
       agentModel: {},
       agentArgsOverride: {},
+      effort: "medium",
       maxConsecutiveFailures: 3,
       preventSleep: true,
     });
@@ -231,6 +238,7 @@ describe("loadConfig", () => {
       agentPathOverride: {},
       agentModel: {},
       agentArgsOverride: {},
+      effort: "medium",
       maxConsecutiveFailures: 3,
       preventSleep: true,
     });
@@ -290,6 +298,7 @@ describe("loadConfig", () => {
       agentPathOverride: {},
       agentModel: {},
       agentArgsOverride: {},
+      effort: "medium",
       maxConsecutiveFailures: 3,
       preventSleep: true,
     });
@@ -305,6 +314,7 @@ describe("loadConfig", () => {
       agentPathOverride: {},
       agentModel: {},
       agentArgsOverride: {},
+      effort: "medium",
       maxConsecutiveFailures: 3,
       preventSleep: true,
     });
@@ -364,6 +374,42 @@ describe("loadConfig", () => {
       claude: ["--dangerously-skip-permissions"],
     });
   });
+
+  it("defaults effort to medium", () => {
+    mockReadFileSync.mockReturnValue("");
+
+    expect(loadConfig().effort).toBe("medium");
+  });
+
+  it.each(["low", "medium", "high", "xhigh", "max"])(
+    "reads effort: %s from config",
+    (effort) => {
+      mockReadFileSync.mockReturnValue(`effort: ${effort}\n`);
+
+      expect(loadConfig().effort).toBe(effort);
+    },
+  );
+
+  it.each(["extreme", "42", "HIGH", '""'])("rejects effort: %s", (effort) => {
+    mockReadFileSync.mockReturnValue(`effort: ${effort}\n`);
+
+    expect(() => loadConfig()).toThrow(
+      /Invalid config value for effort: .*Use low, medium, high, xhigh, or max\./,
+    );
+  });
+
+  it.each(["--effort", "--effort=high"])(
+    "rejects %s in agentArgsOverride.claude and points at the effort setting",
+    (flag) => {
+      mockReadFileSync.mockReturnValue(
+        `agentArgsOverride:\n  claude:\n    - "${flag}"\n    - high\n`,
+      );
+
+      expect(() => loadConfig()).toThrow(
+        `Invalid config value for agentArgsOverride.claude[0]: "${flag}" is managed by gnhf. Set effort in ~/.gnhf/config.yml or pass --effort instead.`,
+      );
+    },
+  );
 
   it("reads agentModel from config", () => {
     mockReadFileSync.mockReturnValue("agentModel:\n  claude: sonnet\n");

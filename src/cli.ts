@@ -17,6 +17,11 @@ import { createInterface } from "node:readline";
 import { Command, InvalidArgumentError } from "commander";
 import { loadConfig } from "./core/config.js";
 import {
+  EFFORT_LEVEL_LIST,
+  isEffortLevel,
+  type EffortLevel,
+} from "./core/effort.js";
+import {
   appendDebugLog,
   initDebugLog,
   serializeError,
@@ -139,6 +144,13 @@ function parseModel(value: string): string {
     throw new InvalidArgumentError("must be a non-empty string");
   }
   return model;
+}
+
+function parseEffort(value: string): EffortLevel {
+  if (!isEffortLevel(value)) {
+    throw new InvalidArgumentError(`must be one of: ${EFFORT_LEVEL_LIST}`);
+  }
+  return value;
 }
 
 function humanizeErrorMessage(message: string): string {
@@ -556,6 +568,11 @@ program
     parseModel,
   )
   .option(
+    "--effort <level>",
+    `Claude reasoning effort (${EFFORT_LEVEL_LIST}); overrides effort from config`,
+    parseEffort,
+  )
+  .option(
     "--max-iterations <n>",
     "Abort after N total iterations",
     parseNonNegativeInteger,
@@ -610,6 +627,7 @@ program
       promptArg: string | undefined,
       options: {
         model?: string;
+        effort?: EffortLevel;
         maxIterations?: number;
         maxTokens?: number;
         maxRateLimitWait?: number;
@@ -658,6 +676,7 @@ program
         ...(options.preventSleep === undefined
           ? {}
           : { preventSleep: options.preventSleep }),
+        ...(options.effort === undefined ? {} : { effort: options.effort }),
       };
 
       initDefaultTelemetry({
@@ -959,6 +978,7 @@ program
         maxTokens: options.maxTokens,
         maxRateLimitWaitMs: options.maxRateLimitWait,
         fallbackModel: options.fallbackModel,
+        effort: config.effort,
         stopWhen: effectiveStopWhen,
         commitMessage: effectiveCommitMessage,
         preventSleep: config.preventSleep,
@@ -979,6 +999,7 @@ program
         {
           ...schemaOptions,
           ...(model === undefined ? {} : { model }),
+          effort: config.effort,
         },
       );
       const orchestrator = new Orchestrator(

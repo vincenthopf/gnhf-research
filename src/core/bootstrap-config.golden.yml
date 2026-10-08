@@ -10,7 +10,7 @@
 #     - --add-dir
 #     - ../shared-lib
 
-# Claude model (optional)
+# Claude model (optional, defaults to claude-opus-5-5)
 # agentModel:
 #   claude: sonnet
 
@@ -19,6 +19,9 @@
 # Use Conventional Commits semantic-release headers:
 # commitMessage:
 #   preset: conventional
+
+# Claude reasoning effort: low, medium, high, xhigh, or max
+effort: medium
 
 # Abort after this many consecutive failures
 maxConsecutiveFailures: 3
