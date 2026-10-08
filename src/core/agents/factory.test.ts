@@ -1,4 +1,3 @@
-import { join } from "node:path";
 import { describe, it, expect, vi } from "vitest";
 
 vi.mock("./claude.js", () => {
@@ -12,113 +11,8 @@ vi.mock("./claude.js", () => {
   return { ClaudeAgent };
 });
 
-vi.mock("./codex.js", () => {
-  const CodexAgent = vi.fn(function (
-    this: Record<string, unknown>,
-    schemaPath: string,
-  ) {
-    this.name = "codex";
-    this.schemaPath = schemaPath;
-  });
-  return { CodexAgent };
-});
-
-vi.mock("./copilot.js", () => {
-  const CopilotAgent = vi.fn(function (
-    this: Record<string, unknown>,
-    deps?: Record<string, unknown>,
-  ) {
-    this.name = "copilot";
-    this.deps = deps;
-  });
-  return { CopilotAgent };
-});
-
-vi.mock("./pi.js", () => {
-  const PiAgent = vi.fn(function (
-    this: Record<string, unknown>,
-    deps?: Record<string, unknown>,
-  ) {
-    this.name = "pi";
-    this.deps = deps;
-  });
-  return { PiAgent };
-});
-
-vi.mock("./cursor.js", () => {
-  const CursorAgent = vi.fn(function (
-    this: Record<string, unknown>,
-    deps?: Record<string, unknown>,
-  ) {
-    this.name = "cursor";
-    this.deps = deps;
-  });
-  return { CursorAgent };
-});
-
-vi.mock("./rovodev.js", () => {
-  const RovoDevAgent = vi.fn(function (
-    this: Record<string, unknown>,
-    schemaPath: string,
-    deps?: Record<string, unknown>,
-  ) {
-    this.name = "rovodev";
-    this.schemaPath = schemaPath;
-    this.deps = deps;
-  });
-  return { RovoDevAgent };
-});
-
-vi.mock("./opencode.js", () => {
-  const OpenCodeAgent = vi.fn(function (
-    this: Record<string, unknown>,
-    deps?: Record<string, unknown>,
-  ) {
-    this.name = "opencode";
-    this.deps = deps;
-  });
-  return { OpenCodeAgent };
-});
-
-vi.mock("./acp.js", () => {
-  const AcpAgent = vi.fn(function (
-    this: Record<string, unknown>,
-    deps?: Record<string, unknown>,
-  ) {
-    const target = (deps as { target?: string } | undefined)?.target ?? "";
-    this.name = `acp:${target}`;
-    this.deps = deps;
-  });
-  return { AcpAgent };
-});
-
 import { createAgent } from "./factory.js";
-import { AcpAgent } from "./acp.js";
 import { ClaudeAgent } from "./claude.js";
-import { CopilotAgent } from "./copilot.js";
-import { CodexAgent } from "./codex.js";
-import { OpenCodeAgent } from "./opencode.js";
-import { PiAgent } from "./pi.js";
-import { CursorAgent } from "./cursor.js";
-import { RovoDevAgent } from "./rovodev.js";
-import type { RunInfo } from "../run.js";
-
-const stubRunInfo: RunInfo = {
-  runId: "test-run",
-  runDir: "/repo/.gnhf/runs/test-run",
-  promptPath: "/repo/.gnhf/runs/test-run/PROMPT.md",
-  notesPath: "/repo/.gnhf/runs/test-run/notes.md",
-  schemaPath: "/repo/.gnhf/runs/test-run/schema.json",
-  logPath: "/repo/.gnhf/runs/test-run/gnhf.log",
-  baseCommit: "abc123",
-  baseCommitPath: "/repo/.gnhf/runs/test-run/base-commit",
-  stopWhenPath: "/repo/.gnhf/runs/test-run/stop-when",
-  stopWhen: undefined,
-  commitMessagePath: "/repo/.gnhf/runs/test-run/commit-message",
-  commitMessage: undefined,
-};
-
-const acpSessionStateDir = join(stubRunInfo.runDir, "acp-sessions");
 
 const noStopSchema = {
   type: "object",
@@ -142,8 +36,8 @@ const withStopSchema = {
 };
 
 describe("createAgent", () => {
-  it("creates a ClaudeAgent when name is 'claude'", () => {
-    const agent = createAgent("claude", stubRunInfo, undefined, undefined, {
+  it("creates a ClaudeAgent", () => {
+    const agent = createAgent(undefined, undefined, {
       includeStopField: false,
     });
     expect(ClaudeAgent).toHaveBeenCalledWith({
@@ -154,14 +48,10 @@ describe("createAgent", () => {
     expect(agent.name).toBe("claude");
   });
 
-  it("passes per-agent extra args through to the ClaudeAgent", () => {
-    const agent = createAgent(
-      "claude",
-      stubRunInfo,
-      undefined,
-      ["--model", "sonnet"],
-      { includeStopField: false },
-    );
+  it("passes extra args through to the ClaudeAgent", () => {
+    const agent = createAgent(undefined, ["--model", "sonnet"], {
+      includeStopField: false,
+    });
 
     expect(ClaudeAgent).toHaveBeenCalledWith({
       bin: undefined,
@@ -172,7 +62,7 @@ describe("createAgent", () => {
   });
 
   it("hands ClaudeAgent a schema that requires should_fully_stop when includeStopField is true", () => {
-    createAgent("claude", stubRunInfo, undefined, undefined, {
+    createAgent(undefined, undefined, {
       includeStopField: true,
     });
     expect(ClaudeAgent).toHaveBeenCalledWith({
@@ -183,7 +73,7 @@ describe("createAgent", () => {
   });
 
   it("hands ClaudeAgent a schema with configured commit message fields", () => {
-    createAgent("claude", stubRunInfo, undefined, undefined, {
+    createAgent(undefined, undefined, {
       includeStopField: false,
       commitFields: [
         { name: "type", allowed: ["feat", "fix"] },
@@ -203,281 +93,6 @@ describe("createAgent", () => {
         },
         required: [...noStopSchema.required, "type", "scope"],
       },
-    });
-  });
-
-  it("creates a CodexAgent when name is 'codex'", () => {
-    const agent = createAgent("codex", stubRunInfo, undefined, undefined, {
-      includeStopField: false,
-    });
-    expect(CodexAgent).toHaveBeenCalledWith(stubRunInfo.schemaPath, {
-      bin: undefined,
-      extraArgs: undefined,
-    });
-    expect(agent.name).toBe("codex");
-  });
-
-  it("creates a CopilotAgent when name is 'copilot'", () => {
-    const agent = createAgent("copilot", stubRunInfo, undefined, undefined, {
-      includeStopField: false,
-    });
-    expect(CopilotAgent).toHaveBeenCalledWith({
-      bin: undefined,
-      extraArgs: undefined,
-      schema: noStopSchema,
-    });
-    expect(agent.name).toBe("copilot");
-  });
-
-  it("passes per-agent extra args through to the CopilotAgent", () => {
-    const agent = createAgent(
-      "copilot",
-      stubRunInfo,
-      undefined,
-      ["--model", "gpt-5.4"],
-      { includeStopField: false },
-    );
-
-    expect(CopilotAgent).toHaveBeenCalledWith({
-      bin: undefined,
-      extraArgs: ["--model", "gpt-5.4"],
-      schema: noStopSchema,
-    });
-    expect(agent.name).toBe("copilot");
-  });
-
-  it("hands CopilotAgent a schema that requires should_fully_stop when includeStopField is true", () => {
-    createAgent("copilot", stubRunInfo, undefined, undefined, {
-      includeStopField: true,
-    });
-    expect(CopilotAgent).toHaveBeenCalledWith({
-      bin: undefined,
-      extraArgs: undefined,
-      schema: withStopSchema,
-    });
-  });
-
-  it("passes per-agent extra args through to the CodexAgent", () => {
-    const agent = createAgent(
-      "codex",
-      stubRunInfo,
-      undefined,
-      ["-m", "gpt-5.4", "--full-auto"],
-      { includeStopField: false },
-    );
-
-    expect(CodexAgent).toHaveBeenCalledWith(stubRunInfo.schemaPath, {
-      bin: undefined,
-      extraArgs: ["-m", "gpt-5.4", "--full-auto"],
-    });
-    expect(agent.name).toBe("codex");
-  });
-
-  it("creates a PiAgent when name is 'pi'", () => {
-    const agent = createAgent("pi", stubRunInfo, undefined, undefined, {
-      includeStopField: false,
-    });
-    expect(PiAgent).toHaveBeenCalledWith({
-      bin: undefined,
-      extraArgs: undefined,
-      schema: noStopSchema,
-    });
-    expect(agent.name).toBe("pi");
-  });
-
-  it("passes path override and extra args through to the PiAgent", () => {
-    const agent = createAgent(
-      "pi",
-      stubRunInfo,
-      "/custom/pi",
-      ["--provider", "openai-codex", "--model", "gpt-5.5"],
-      { includeStopField: false },
-    );
-
-    expect(PiAgent).toHaveBeenCalledWith({
-      bin: "/custom/pi",
-      extraArgs: ["--provider", "openai-codex", "--model", "gpt-5.5"],
-      schema: noStopSchema,
-    });
-    expect(agent.name).toBe("pi");
-  });
-
-  it("hands PiAgent a schema that requires should_fully_stop when includeStopField is true", () => {
-    createAgent("pi", stubRunInfo, undefined, undefined, {
-      includeStopField: true,
-    });
-    expect(PiAgent).toHaveBeenCalledWith({
-      bin: undefined,
-      extraArgs: undefined,
-      schema: withStopSchema,
-    });
-  });
-
-  it("creates a CursorAgent when name is 'cursor'", () => {
-    const agent = createAgent("cursor", stubRunInfo, undefined, undefined, {
-      includeStopField: false,
-    });
-    expect(CursorAgent).toHaveBeenCalledWith({
-      bin: undefined,
-      extraArgs: undefined,
-      schema: noStopSchema,
-    });
-    expect(agent.name).toBe("cursor");
-  });
-
-  it("passes path override and extra args through to the CursorAgent", () => {
-    const agent = createAgent(
-      "cursor",
-      stubRunInfo,
-      "/custom/agent",
-      ["--model", "composer-2"],
-      { includeStopField: false },
-    );
-
-    expect(CursorAgent).toHaveBeenCalledWith({
-      bin: "/custom/agent",
-      extraArgs: ["--model", "composer-2"],
-      schema: noStopSchema,
-    });
-    expect(agent.name).toBe("cursor");
-  });
-
-  it("hands CursorAgent a schema that requires should_fully_stop when includeStopField is true", () => {
-    createAgent("cursor", stubRunInfo, undefined, undefined, {
-      includeStopField: true,
-    });
-    expect(CursorAgent).toHaveBeenCalledWith({
-      bin: undefined,
-      extraArgs: undefined,
-      schema: withStopSchema,
-    });
-  });
-
-  it("creates a RovoDevAgent when name is 'rovodev'", () => {
-    const agent = createAgent("rovodev", stubRunInfo, undefined, undefined, {
-      includeStopField: false,
-    });
-    expect(RovoDevAgent).toHaveBeenCalledWith(stubRunInfo.schemaPath, {
-      bin: undefined,
-      extraArgs: undefined,
-    });
-    expect(agent.name).toBe("rovodev");
-  });
-
-  it("passes per-agent extra args through to the RovoDevAgent", () => {
-    const agent = createAgent(
-      "rovodev",
-      stubRunInfo,
-      undefined,
-      ["--profile", "work"],
-      { includeStopField: false },
-    );
-
-    expect(RovoDevAgent).toHaveBeenCalledWith(stubRunInfo.schemaPath, {
-      bin: undefined,
-      extraArgs: ["--profile", "work"],
-    });
-    expect(agent.name).toBe("rovodev");
-  });
-
-  it("creates an OpenCodeAgent when name is 'opencode'", () => {
-    const agent = createAgent("opencode", stubRunInfo, undefined, undefined, {
-      includeStopField: false,
-    });
-    expect(OpenCodeAgent).toHaveBeenCalledWith({
-      bin: undefined,
-      extraArgs: undefined,
-      schema: noStopSchema,
-    });
-    expect(agent.name).toBe("opencode");
-  });
-
-  it("passes per-agent extra args through to the OpenCodeAgent", () => {
-    const agent = createAgent(
-      "opencode",
-      stubRunInfo,
-      undefined,
-      ["--model", "gpt-5"],
-      { includeStopField: false },
-    );
-
-    expect(OpenCodeAgent).toHaveBeenCalledWith({
-      bin: undefined,
-      extraArgs: ["--model", "gpt-5"],
-      schema: noStopSchema,
-    });
-    expect(agent.name).toBe("opencode");
-  });
-
-  it("hands OpenCodeAgent a schema that requires should_fully_stop when includeStopField is true", () => {
-    createAgent("opencode", stubRunInfo, undefined, undefined, {
-      includeStopField: true,
-    });
-    expect(OpenCodeAgent).toHaveBeenCalledWith({
-      bin: undefined,
-      extraArgs: undefined,
-      schema: withStopSchema,
-    });
-  });
-
-  it("creates an AcpAgent when the spec uses an acp: prefix", () => {
-    const agent = createAgent("acp:gemini", stubRunInfo, undefined, undefined, {
-      includeStopField: false,
-    });
-
-    expect(AcpAgent).toHaveBeenCalledWith({
-      target: "gemini",
-      schema: noStopSchema,
-      runId: stubRunInfo.runId,
-      sessionStateDir: acpSessionStateDir,
-    });
-    expect(agent.name).toBe("acp:gemini");
-  });
-
-  it("forwards raw ACP command specs as custom acpx targets", () => {
-    const command = "./bin/dev-acp --profile ci";
-    const agent = createAgent(
-      `acp:${command}`,
-      stubRunInfo,
-      undefined,
-      undefined,
-      {
-        includeStopField: false,
-      },
-    );
-
-    expect(AcpAgent).toHaveBeenCalledWith({
-      target: command,
-      schema: noStopSchema,
-      runId: stubRunInfo.runId,
-      sessionStateDir: acpSessionStateDir,
-    });
-    expect(agent.name).toBe(`acp:${command}`);
-  });
-
-  it("hands AcpAgent a schema that requires should_fully_stop when includeStopField is true", () => {
-    createAgent("acp:cursor", stubRunInfo, undefined, undefined, {
-      includeStopField: true,
-    });
-    expect(AcpAgent).toHaveBeenCalledWith({
-      target: "cursor",
-      schema: withStopSchema,
-      runId: stubRunInfo.runId,
-      sessionStateDir: acpSessionStateDir,
-    });
-  });
-
-  it("ignores per-agent path/args overrides for acp specs (v1)", () => {
-    createAgent("acp:gemini", stubRunInfo, "/custom", ["--model", "x"], {
-      includeStopField: false,
-    });
-    // The factory should not forward pathOverride or extraArgs to AcpAgent;
-    // override semantics for ACP targets aren't defined in v1.
-    expect(AcpAgent).toHaveBeenCalledWith({
-      target: "gemini",
-      schema: noStopSchema,
-      runId: stubRunInfo.runId,
-      sessionStateDir: acpSessionStateDir,
     });
   });
 });

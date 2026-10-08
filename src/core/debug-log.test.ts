@@ -72,7 +72,7 @@ describe("debug-log", () => {
 
   it("buffers events emitted before init and flushes them on init", () => {
     appendDebugLog("sleep:active", { command: "caffeinate" });
-    appendDebugLog("opencode:spawn", { port: 12345 });
+    appendDebugLog("claude:spawn", { port: 12345 });
 
     // Nothing should be written yet — no log path known.
     expect(existsSync(logPath)).toBe(false);
@@ -81,7 +81,7 @@ describe("debug-log", () => {
     appendDebugLog("run:start");
 
     const events = readLines(logPath).map((entry) => entry.event);
-    expect(events).toEqual(["sleep:active", "opencode:spawn", "run:start"]);
+    expect(events).toEqual(["sleep:active", "claude:spawn", "run:start"]);
   });
 
   it("drops the oldest pre-init events when the buffer fills up and records a sentinel", () => {

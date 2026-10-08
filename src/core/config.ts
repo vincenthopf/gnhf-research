@@ -6,98 +6,42 @@ import type { CommitMessageConfig } from "./commit-message.js";
 import { normalizeCommitMessageConfig } from "./commit-message-config.js";
 import { InvalidConfigError } from "./config-errors.js";
 
-export const AGENT_NAMES = [
-  "claude",
-  "codex",
-  "rovodev",
-  "opencode",
-  "copilot",
-  "pi",
-  "cursor",
-] as const;
+export const AGENT_NAMES = ["claude"] as const;
 
 export type AgentName = (typeof AGENT_NAMES)[number];
 
-// Agents reached via the bundled acpx runtime: built-in target names,
-// configured registry names, or raw custom ACP server commands. Always
-// written as "acp:<target-or-command>" so the prefix routes to AcpAgent.
-export type AcpAgentSpec = `acp:${string}`;
-
-export type AgentSpec = AgentName | AcpAgentSpec;
-
-export function isAgentName(name: unknown): name is AgentName {
-  return (
-    typeof name === "string" &&
-    (AGENT_NAMES as readonly string[]).includes(name)
-  );
-}
-
-function hasDisallowedAcpTargetChar(target: string): boolean {
-  for (let i = 0; i < target.length; i += 1) {
-    const code = target.charCodeAt(i);
-    if (code < 0x20 || code === 0x7f) return true;
-  }
-  return false;
-}
-
-export function isAcpSpec(spec: unknown): spec is AcpAgentSpec {
-  if (typeof spec !== "string") return false;
-  if (!spec.startsWith("acp:")) return false;
-  const target = spec.slice("acp:".length);
-  return (
-    target.length > 0 &&
-    target.trim() === target &&
-    !hasDisallowedAcpTargetChar(target)
-  );
-}
-
-export function isAgentSpec(spec: unknown): spec is AgentSpec {
-  return isAgentName(spec) || isAcpSpec(spec);
-}
-
-export function getAcpTarget(spec: AcpAgentSpec): string {
-  return spec.slice("acp:".length);
-}
-
-export function isNamedAcpTarget(target: string): boolean {
-  return ACP_TARGET_NAME_PATTERN.test(target);
-}
-
-export function redactAcpTargetForLogs(target: string): string {
-  return isNamedAcpTarget(target) ? target : "custom";
-}
-
-export function redactAgentSpecForLogs(spec: string): string {
-  if (!spec.startsWith("acp:")) return spec;
-  return `acp:${redactAcpTargetForLogs(spec.slice("acp:".length))}`;
-}
-
 export interface Config {
-  agent: AgentSpec;
   agentModel: Partial<Record<AgentName, string>>;
   agentPathOverride: Partial<Record<AgentName, string>>;
   agentArgsOverride: Partial<Record<AgentName, string[]>>;
-  acpRegistryOverrides: Record<string, string>;
   commitMessage?: CommitMessageConfig;
   maxConsecutiveFailures: number;
   preventSleep: boolean;
 }
 
 const DEFAULT_CONFIG: Config = {
-  agent: "claude",
   agentModel: {},
   agentPathOverride: {},
   agentArgsOverride: {},
-  acpRegistryOverrides: {},
   maxConsecutiveFailures: 3,
   preventSleep: true,
 };
 
-const ACP_TARGET_NAME_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._:-]*$/;
+function unsupportedAgentMessage(label: string, key: string): string {
+  return `Invalid agent name in ${label}: "${key}". gnhf only supports "claude"; remove ${label}.${key} from ~/.gnhf/config.yml.`;
+}
 
-function formatAgentNameList(): string {
-  const quoted = AGENT_NAMES.map((name) => `"${name}"`);
-  return `${quoted.slice(0, -1).join(", ")}, or ${quoted[quoted.length - 1]}`;
+function describeLegacyAgent(value: unknown): string {
+  return typeof value === "string" && /^[A-Za-z0-9._-]+$/.test(value)
+    ? `"${value}"`
+    : "a non-claude agent";
+}
+
+function normalizeLegacyAgent(value: unknown): void {
+  if (value === "claude") return;
+  throw new InvalidConfigError(
+    `Unsupported config value for agent: ${describeLegacyAgent(value)}. gnhf only supports claude; remove the agent key from ~/.gnhf/config.yml.`,
+  );
 }
 
 function normalizePreventSleep(value: unknown): boolean | undefined {
@@ -111,131 +55,22 @@ function normalizePreventSleep(value: unknown): boolean | undefined {
   return undefined;
 }
 
-function isOpencodeModelArg(arg: string): boolean {
+function isReservedAgentArg(arg: string): boolean {
   return (
-    arg === "--model" ||
-    arg.startsWith("--model=") ||
-    arg === "-m" ||
-    arg.startsWith("-m=")
+    arg === "-p" ||
+    arg === "--print" ||
+    arg === "--verbose" ||
+    arg === "--output-format" ||
+    arg.startsWith("--output-format=") ||
+    arg === "--json-schema" ||
+    arg.startsWith("--json-schema=")
   );
-}
-
-function isOpenCodeModel(model: string): boolean {
-  const slashIndex = model.indexOf("/");
-  return slashIndex > 0 && slashIndex < model.length - 1;
-}
-
-function isReservedAgentArg(agent: AgentName, arg: string): boolean {
-  switch (agent) {
-    case "claude":
-      return (
-        arg === "-p" ||
-        arg === "--print" ||
-        arg === "--verbose" ||
-        arg === "--output-format" ||
-        arg.startsWith("--output-format=") ||
-        arg === "--json-schema" ||
-        arg.startsWith("--json-schema=")
-      );
-    case "codex":
-      return (
-        arg === "exec" ||
-        arg === "--json" ||
-        arg === "--output-schema" ||
-        arg.startsWith("--output-schema=") ||
-        arg === "--color" ||
-        arg.startsWith("--color=")
-      );
-    case "opencode":
-      return (
-        arg === "serve" ||
-        arg === "--hostname" ||
-        arg.startsWith("--hostname=") ||
-        arg === "--port" ||
-        arg.startsWith("--port=") ||
-        arg === "--print-logs"
-      );
-    case "rovodev":
-      return (
-        arg === "rovodev" ||
-        arg === "serve" ||
-        arg === "--disable-session-token"
-      );
-    case "copilot":
-      return (
-        arg === "-p" ||
-        arg === "--prompt" ||
-        arg.startsWith("--prompt=") ||
-        arg === "-i" ||
-        arg === "--interactive" ||
-        arg.startsWith("--interactive=") ||
-        arg === "-s" ||
-        arg === "--silent" ||
-        arg === "--output-format" ||
-        arg.startsWith("--output-format=") ||
-        arg === "--stream" ||
-        arg.startsWith("--stream=") ||
-        arg === "--no-color" ||
-        arg === "--share" ||
-        arg.startsWith("--share=") ||
-        arg === "--share-gist"
-      );
-    case "pi":
-      return (
-        arg === "--mode" ||
-        arg.startsWith("--mode=") ||
-        arg === "--print" ||
-        arg === "-p" ||
-        arg === "--continue" ||
-        arg === "-c" ||
-        arg === "--resume" ||
-        arg === "-r" ||
-        arg === "--session" ||
-        arg.startsWith("--session=") ||
-        arg === "--fork" ||
-        arg.startsWith("--fork=") ||
-        arg === "--session-dir" ||
-        arg.startsWith("--session-dir=") ||
-        arg === "--no-session" ||
-        arg === "--export" ||
-        arg.startsWith("--export=") ||
-        arg === "--list-models" ||
-        arg.startsWith("--list-models=") ||
-        arg === "--help" ||
-        arg === "-h" ||
-        arg === "--version" ||
-        arg === "-v" ||
-        arg === "--api-key" ||
-        arg.startsWith("--api-key=")
-      );
-    case "cursor":
-      return (
-        arg === "-p" ||
-        arg === "--print" ||
-        arg === "--output-format" ||
-        arg.startsWith("--output-format=") ||
-        arg === "--stream-partial-output" ||
-        arg === "--workspace" ||
-        arg.startsWith("--workspace=") ||
-        arg === "--resume" ||
-        arg.startsWith("--resume=") ||
-        arg === "--continue" ||
-        arg === "-w" ||
-        arg === "--worktree" ||
-        arg.startsWith("--worktree=") ||
-        arg === "--worktree-base" ||
-        arg.startsWith("--worktree-base=") ||
-        arg === "--skip-worktree-setup" ||
-        arg === "--api-key" ||
-        arg.startsWith("--api-key=")
-      );
-  }
 }
 
 /**
  * Resolve a user-supplied path against the config directory (~/.gnhf).
  * Expands leading `~` or `~/` to the home directory, then resolves relative
- * paths against `baseDir` so that entries like `./bin/codex` work predictably
+ * paths against `baseDir` so that entries like `./bin/claude` work predictably
  * regardless of the repo's cwd. Bare executable names and absolute paths pass
  * through unchanged.
  */
@@ -277,7 +112,7 @@ function normalizeAgentPathOverride(
   for (const [key, val] of Object.entries(value as Record<string, unknown>)) {
     if (!validNames.has(key)) {
       throw new InvalidConfigError(
-        `Invalid agent name in agentPathOverride: "${key}". Use ${formatAgentNameList()}.`,
+        unsupportedAgentMessage("agentPathOverride", key),
       );
     }
     if (typeof val !== "string") {
@@ -299,7 +134,6 @@ function normalizeAgentPathOverride(
 function normalizeAgentExtraArgs(
   value: unknown,
   label: string,
-  agent: AgentName,
 ): string[] | undefined {
   if (value === undefined || value === null) return undefined;
   if (!Array.isArray(value)) {
@@ -322,13 +156,7 @@ function normalizeAgentExtraArgs(
       );
     }
 
-    if (agent === "opencode" && isOpencodeModelArg(trimmed)) {
-      throw new InvalidConfigError(
-        `Invalid config value for ${label}[${index}]: "${trimmed}" sets the model, which gnhf sends in the opencode request body. Use --model or agentModel.opencode instead.`,
-      );
-    }
-
-    if (isReservedAgentArg(agent, trimmed)) {
+    if (isReservedAgentArg(trimmed)) {
       throw new InvalidConfigError(
         `Invalid config value for ${label}[${index}]: "${trimmed}" is managed by gnhf and cannot be overridden`,
       );
@@ -356,14 +184,10 @@ function normalizeAgentArgsOverride(
   )) {
     if (!validNames.has(key)) {
       throw new InvalidConfigError(
-        `Invalid agent name in agentArgsOverride: "${key}". Use ${formatAgentNameList()}.`,
+        unsupportedAgentMessage("agentArgsOverride", key),
       );
     }
-    const args = normalizeAgentExtraArgs(
-      rawConfig,
-      `agentArgsOverride.${key}`,
-      key as AgentName,
-    );
+    const args = normalizeAgentExtraArgs(rawConfig, `agentArgsOverride.${key}`);
     if (args !== undefined) {
       result[key as AgentName] = args;
     }
@@ -387,9 +211,7 @@ function normalizeAgentModel(
 
   for (const [key, val] of Object.entries(value as Record<string, unknown>)) {
     if (!validNames.has(key)) {
-      throw new InvalidConfigError(
-        `Invalid agent name in agentModel: "${key}". Use ${formatAgentNameList()}.`,
-      );
+      throw new InvalidConfigError(unsupportedAgentMessage("agentModel", key));
     }
     if (typeof val !== "string") {
       throw new InvalidConfigError(
@@ -401,62 +223,31 @@ function normalizeAgentModel(
         `Invalid model for agentModel.${key}: expected a non-empty string`,
       );
     }
-    const agent = key as AgentName;
-    const model = val.trim();
-    if (agent === "opencode" && !isOpenCodeModel(model)) {
-      throw new InvalidConfigError(
-        "Invalid model for agentModel.opencode: expected provider/model",
-      );
-    }
-    if (agent === "rovodev") {
-      throw new InvalidConfigError(
-        "Invalid model for agentModel.rovodev: configure agent.modelId in Rovo Dev settings instead",
-      );
-    }
-    result[agent] = model;
+    result[key as AgentName] = val.trim();
   }
 
   return Object.keys(result).length === 0 ? undefined : result;
 }
 
-function normalizeAcpRegistryOverrides(
-  value: unknown,
-): Record<string, string> | undefined {
-  if (value === undefined || value === null) return undefined;
-  if (typeof value !== "object" || Array.isArray(value)) {
-    throw new InvalidConfigError(
-      `Invalid config value for acpRegistryOverrides: expected an object mapping ACP target names to commands`,
-    );
-  }
-
-  const result: Record<string, string> = {};
-  for (const [key, val] of Object.entries(value as Record<string, unknown>)) {
-    if (!ACP_TARGET_NAME_PATTERN.test(key)) {
-      throw new InvalidConfigError(
-        `Invalid target name in acpRegistryOverrides: "${key}". Target names must start with a letter or digit and contain only letters, digits, dots, underscores, colons, or hyphens.`,
-      );
-    }
-    if (typeof val !== "string") {
-      throw new InvalidConfigError(
-        `Invalid command for acpRegistryOverrides.${key}: expected a string`,
-      );
-    }
-    if (val.trim() === "") {
-      throw new InvalidConfigError(
-        `Invalid command for acpRegistryOverrides.${key}: expected a non-empty string`,
-      );
-    }
-    result[key] = val.trim();
-  }
-
-  return result;
-}
+type RawConfig = Partial<Config> & {
+  agent?: unknown;
+  acpRegistryOverrides?: unknown;
+};
 
 function normalizeConfig(
-  config: Partial<Config>,
+  config: RawConfig,
   configDir?: string,
 ): Partial<Config> {
-  const normalized: Partial<Config> = { ...config };
+  const { agent, acpRegistryOverrides, ...rest } = config;
+  if (Object.prototype.hasOwnProperty.call(config, "agent")) {
+    normalizeLegacyAgent(agent);
+  }
+  if (acpRegistryOverrides !== undefined && acpRegistryOverrides !== null) {
+    throw new InvalidConfigError(
+      "Unsupported config key acpRegistryOverrides: gnhf only supports claude; remove acpRegistryOverrides from ~/.gnhf/config.yml.",
+    );
+  }
+  const normalized: Partial<Config> = { ...rest };
   const hasPreventSleep = Object.prototype.hasOwnProperty.call(
     config,
     "preventSleep",
@@ -523,23 +314,6 @@ function normalizeConfig(
     }
   } else {
     delete normalized.agentModel;
-  }
-
-  const hasAcpRegistryOverrides = Object.prototype.hasOwnProperty.call(
-    config,
-    "acpRegistryOverrides",
-  );
-  if (hasAcpRegistryOverrides) {
-    const acpRegistryOverrides = normalizeAcpRegistryOverrides(
-      config.acpRegistryOverrides,
-    );
-    if (acpRegistryOverrides === undefined) {
-      delete normalized.acpRegistryOverrides;
-    } else {
-      normalized.acpRegistryOverrides = acpRegistryOverrides;
-    }
-  } else {
-    delete normalized.acpRegistryOverrides;
   }
 
   const hasCommitMessage = Object.prototype.hasOwnProperty.call(
@@ -616,12 +390,6 @@ function serializeAgentModel(
     .trimEnd();
 }
 
-function serializeAgent(agent: AgentSpec): string {
-  return yaml
-    .dump({ agent }, { lineWidth: -1, noRefs: true, sortKeys: false })
-    .trimEnd();
-}
-
 function serializeConfig(config: Config): string {
   const agentPathOverrideSection = serializeAgentPathOverride(
     config.agentPathOverride,
@@ -631,57 +399,21 @@ function serializeConfig(config: Config): string {
   );
   const agentModelSection = serializeAgentModel(config.agentModel);
   const lines = [
-    "# Agent to use by default: native agent name or acp:<target-or-command>",
-    serializeAgent(config.agent),
-    "",
-    "# Custom paths to native agent binaries (optional)",
+    "# Custom path to the claude binary (optional)",
     "# Paths may be absolute, bare executable names on PATH,",
     "# ~-prefixed, or relative to this config directory.",
-    "# Note: rovodev overrides must point to an acli-compatible binary.",
     "# agentPathOverride:",
     "#   claude: /path/to/custom-claude",
-    "#   codex: /path/to/custom-codex",
-    "#   copilot: /path/to/custom-copilot",
-    "#   pi: /path/to/custom-pi",
-    "#   cursor: /path/to/custom-cursor-agent",
     "",
-    "# Native agent CLI arg overrides (optional)",
-    "# ACP targets do not support path or arg overrides.",
+    "# Extra claude CLI args (optional)",
     "# agentArgsOverride:",
-    "#   codex:",
-    "#     - -m",
-    "#     - gpt-5.4",
-    "#     - -c",
-    '#     - model_reasoning_effort="high"',
-    "#     - --full-auto",
-    "#   copilot:",
-    "#     - --model",
-    "#     - gpt-5.4",
-    "#   pi:",
-    "#     - --provider",
-    "#     - openai-codex",
-    "#     - --model",
-    "#     - gpt-5.5",
-    "#     - --thinking",
-    "#     - high",
-    "#   cursor:",
-    "#     - --model",
-    "#     - composer-2.5",
+    "#   claude:",
+    "#     - --add-dir",
+    "#     - ../shared-lib",
     "",
-    "# Models for supported native agents (optional)",
-    "# Values are forwarded to the CLI except opencode, which receives",
-    "# its model in the request body.",
+    "# Claude model (optional)",
     "# agentModel:",
     "#   claude: sonnet",
-    "#   codex: gpt-5.4",
-    "#   opencode: fireworks-ai/accounts/fireworks/models/qwen3p6-plus",
-    "",
-    "# Custom ACP target commands (optional)",
-    "# Maps acp:<target> names to spawn commands. Useful for naming a",
-    "# local or beta build of an ACP agent.",
-    "# acpRegistryOverrides:",
-    '#   my-fork: "/usr/local/bin/my-claude-code-fork --acp"',
-    '#   staging: "node /opt/staging/agent.mjs"',
     "",
     "# Commit message convention (optional)",
     "# Defaults to: gnhf <iteration>: <summary>",
@@ -724,7 +456,7 @@ export function loadConfig(overrides?: Partial<Config>): Config {
   try {
     const raw = readFileSync(configPath, "utf-8");
     fileConfig = normalizeConfig(
-      (yaml.load(raw) as Partial<Config>) ?? {},
+      (yaml.load(raw) as RawConfig) ?? {},
       configDir,
     );
   } catch (error) {

@@ -45,17 +45,8 @@ describe("renderTitle", () => {
   });
 
   it("renders the agent name in the eyebrow", () => {
-    const lines = renderTitle("rovodev").map(stripAnsi);
-    expect(lines[0]).toContain("g n h f");
-    expect(lines[0]).toContain("·");
-    expect(lines[0]).toContain("r o v o d e v");
-  });
-
-  it("renders an acp:<target> spec as two dot-separated segments", () => {
-    const lines = renderTitle("acp:claude").map(stripAnsi);
-    expect(lines[0]).toContain("g n h f  ·  a c p  ·  c l a u d e");
-    // The colon should not appear as a letter-spaced character.
-    expect(lines[0]).not.toContain("a c p :");
+    const lines = renderTitle("claude").map(stripAnsi);
+    expect(lines[0]).toContain("g n h f  ·  c l a u d e");
   });
 
   it("renders all three lines of ASCII art", () => {

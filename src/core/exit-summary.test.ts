@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 import { renderExitSummary, stripExitSummaryAnsi } from "./exit-summary.js";
 
 const baseSummary = {
-  agentName: "opencode",
+  agentName: "claude",
   branchName: "gnhf/refactor-auth-flow",
   elapsedMs: 47 * 60_000 + 12_000,
   status: "stopped" as const,
@@ -37,7 +37,7 @@ describe("renderExitSummary", () => {
 
     expect(summary).toContain("✦ gnhf wrapped");
     expect(summary).toContain(
-      "opencode worked for 47m 12s on gnhf/refactor-auth-flow",
+      "claude worked for 47m 12s on gnhf/refactor-auth-flow",
     );
     expect(summary).toContain(
       "iterations      8 total       6 good       2 failed",
@@ -84,7 +84,7 @@ describe("renderExitSummary", () => {
 
     expect(summary).toContain("× gnhf stopped");
     expect(summary).toContain(
-      "opencode ran for 47m 12s before: 3 consecutive failures",
+      "claude ran for 47m 12s before: 3 consecutive failures",
     );
   });
 

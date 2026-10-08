@@ -8,7 +8,7 @@ import {
   type TokenUsage,
   type UsageOverage,
 } from "./agents/types.js";
-import { redactAgentSpecForLogs, type Config } from "./config.js";
+import type { Config } from "./config.js";
 import type { RunInfo } from "./run.js";
 import { appendNotes, toStringArray } from "./run.js";
 import { appendDebugLog, serializeError } from "./debug-log.js";
@@ -57,8 +57,8 @@ export interface OrchestratorState {
   totalCacheReadTokens: number;
   totalCacheCreationTokens: number;
   // Sticky flag: true when at least one iteration's usage was reported as
-  // estimated (e.g. an ACP adapter that doesn't emit usage_update). Once set,
-  // it stays set for the rest of the run so totals are presented honestly.
+  // estimated. Once set, it stays set for the rest of the run so totals are
+  // presented honestly.
   tokensEstimated: boolean;
   commitCount: number;
   iterations: IterationRecord[];
@@ -303,7 +303,7 @@ export class Orchestrator extends EventEmitter<OrchestratorEvents> {
     this.emit("state", this.getState());
 
     appendDebugLog("orchestrator:start", {
-      agent: redactAgentSpecForLogs(this.agent.name),
+      agent: this.agent.name,
       runId: this.runInfo.runId,
       startIteration: this.state.currentIteration,
       maxIterations: this.limits.maxIterations,
@@ -636,7 +636,7 @@ export class Orchestrator extends EventEmitter<OrchestratorEvents> {
     const agentStartedAt = Date.now();
     appendDebugLog("agent:run:start", {
       iteration: this.state.currentIteration,
-      agent: redactAgentSpecForLogs(this.agent.name),
+      agent: this.agent.name,
       logPath,
     });
 

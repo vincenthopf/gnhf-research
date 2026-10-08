@@ -1,5 +1,3 @@
-import { parseAgentJson } from "./json-extract.js";
-
 export interface AgentOutput {
   success: boolean;
   summary: string;
@@ -18,103 +16,11 @@ export interface AgentOutputSchema {
   required: string[];
 }
 
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
-}
-
-function describeSchemaType(name: string, type: string): string {
-  const article = /^[aeiou]/.test(type) ? "an" : "a";
-  return `${name} must be ${article} ${type}`;
-}
-
-export function validateAgentOutput(
-  value: unknown,
-  schema: AgentOutputSchema,
-): AgentOutput {
-  if (!isRecord(value)) {
-    throw new Error("expected an object");
-  }
-
-  if (schema.additionalProperties === false) {
-    const allowed = new Set(Object.keys(schema.properties));
-    const extraKey = Object.keys(value).find((key) => !allowed.has(key));
-    if (extraKey) {
-      throw new Error(`unexpected property ${extraKey}`);
-    }
-  }
-
-  for (const name of schema.required) {
-    if (!(name in value)) {
-      throw new Error(`${name} is required`);
-    }
-  }
-
-  for (const [name, property] of Object.entries(schema.properties)) {
-    if (!(name in value)) {
-      continue;
-    }
-    const propertyValue = value[name];
-
-    if (property.type === "array") {
-      if (
-        !Array.isArray(propertyValue) ||
-        property.items?.type !== "string" ||
-        !propertyValue.every((item) => typeof item === "string")
-      ) {
-        throw new Error(`${name} must be an array of strings`);
-      }
-      continue;
-    }
-
-    if (typeof propertyValue !== property.type) {
-      throw new Error(describeSchemaType(name, property.type));
-    }
-
-    if (property.enum && !property.enum.includes(propertyValue as string)) {
-      throw new Error(
-        `${name} must be one of ${property.enum.map((item) => JSON.stringify(item)).join(", ")}`,
-      );
-    }
-  }
-
-  return value as unknown as AgentOutput;
-}
-
-export function parseAgentOutput(
-  text: string,
-  schema: AgentOutputSchema,
-  agentLabel: string,
-): AgentOutput {
-  const parsed = parseAgentJson(text, (value) => {
-    try {
-      validateAgentOutput(value, schema);
-      return true;
-    } catch {
-      return false;
-    }
-  });
-  if (parsed !== null) {
-    return validateAgentOutput(parsed, schema);
-  }
-
-  const fallbackParsed = parseAgentJson(text);
-  if (fallbackParsed !== null) {
-    return validateAgentOutput(fallbackParsed, schema);
-  }
-
-  throw new SyntaxError(
-    `${agentLabel} output did not contain a parseable JSON object`,
-  );
-}
-
 export interface AgentOutputCommitField {
   name: string;
   allowed?: string[];
 }
 
-// Codex's --output-schema enforces OpenAI strict mode, which requires every
-// key in `properties` to also appear in `required` when additionalProperties
-// is false. So include should_fully_stop only when the run actually uses it.
 export function buildAgentOutputSchema(opts: {
   includeStopField: boolean;
   commitFields?: AgentOutputCommitField[];
@@ -153,8 +59,7 @@ export interface TokenUsage {
   cacheReadTokens: number;
   cacheCreationTokens: number;
   // True when the agent could not source authoritative usage from the model
-  // and the numbers are heuristic estimates. ACP adapters that don't emit
-  // usage_update notifications fall into this case.
+  // and the numbers are heuristic estimates.
   estimated?: boolean;
 }
 

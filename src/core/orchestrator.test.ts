@@ -61,11 +61,9 @@ const mockResetHard = vi.mocked(resetHard);
 const mockAppendDebugLog = vi.mocked(appendDebugLog);
 
 const config: Config = {
-  agent: "claude",
   agentPathOverride: {},
   agentModel: {},
   agentArgsOverride: {},
-  acpRegistryOverrides: {},
   maxConsecutiveFailures: 3,
   preventSleep: true,
 };
@@ -108,10 +106,9 @@ describe("Orchestrator output normalization", () => {
     vi.useRealTimers();
   });
 
-  it("redacts raw ACP agent specs in debug logs", async () => {
-    const rawAgent = "acp:./bin/dev-acp --profile ci --token secret";
+  it("names the agent in lifecycle debug logs", async () => {
     const agent: Agent = {
-      name: rawAgent,
+      name: "claude",
       run: vi.fn(async () => createSuccessResult()),
     };
     const orchestrator = new Orchestrator(
@@ -128,14 +125,11 @@ describe("Orchestrator output normalization", () => {
 
     expect(mockAppendDebugLog).toHaveBeenCalledWith(
       "orchestrator:start",
-      expect.objectContaining({ agent: "acp:custom" }),
+      expect.objectContaining({ agent: "claude" }),
     );
     expect(mockAppendDebugLog).toHaveBeenCalledWith(
       "agent:run:start",
-      expect.objectContaining({ agent: "acp:custom" }),
-    );
-    expect(JSON.stringify(mockAppendDebugLog.mock.calls)).not.toContain(
-      "secret",
+      expect.objectContaining({ agent: "claude" }),
     );
   });
 
@@ -536,7 +530,7 @@ describe("Orchestrator stop limits", () => {
 
   it("does not commit when an agent resolves after triggering the token cap", async () => {
     const agent: Agent = {
-      name: "opencode",
+      name: "claude",
       run: vi.fn((_prompt, _cwd, options) => {
         options?.onUsage?.({
           inputTokens: 10,
@@ -583,7 +577,7 @@ describe("Orchestrator stop limits", () => {
     // added to the budget. Input+output alone were 22% of the cap while the
     // run had already spent $48.
     const agent: Agent = {
-      name: "opencode",
+      name: "claude",
       run: vi.fn(
         (_prompt, _cwd, options) =>
           new Promise<AgentResult>((_resolve, reject) => {
@@ -627,7 +621,7 @@ describe("Orchestrator stop limits", () => {
   it("accumulates cache tokens across iterations rather than overwriting them", async () => {
     let call = 0;
     const agent: Agent = {
-      name: "opencode",
+      name: "claude",
       run: vi.fn(async (_prompt, _cwd, options) => {
         call += 1;
         options?.onUsage?.({
@@ -674,7 +668,7 @@ describe("Orchestrator stop limits", () => {
   it("marks in-flight usage as estimated until authoritative usage arrives", async () => {
     const observedEstimatedStates: boolean[] = [];
     const agent: Agent = {
-      name: "acp:test",
+      name: "claude",
       run: vi.fn(async (_prompt, _cwd, options) => {
         options?.onUsage?.({
           inputTokens: 4,
@@ -719,7 +713,7 @@ describe("Orchestrator stop limits", () => {
 
     let callCount = 0;
     const agent: Agent = {
-      name: "acp:test",
+      name: "claude",
       run: vi.fn(async (_prompt, _cwd, options) => {
         callCount++;
         if (callCount === 1) {

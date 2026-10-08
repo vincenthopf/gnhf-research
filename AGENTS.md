@@ -19,7 +19,7 @@ Releases are automated via release-please; never hand-edit `CHANGELOG.md` or `.r
 - `src/core/run.ts`: `.gnhf/runs/<runId>/` metadata (kept local via `.git/info/exclude`).
 - `src/core/orchestrator.ts`: the iteration loop, commit/rollback, backoff, usage-limit waits, and `RunLimits`.
 - `src/renderer.ts`: alt-screen TUI driven by orchestrator events; `--mock` drives it offline via `src/mock-orchestrator.ts`.
-- `src/core/agents/`: one module per agent implementing `Agent` in `types.ts`, picked by `factory.ts`. Start from `stream-utils.ts` for streaming and process lifecycle, and use `parseAgentOutput` to validate a new native agent's output.
+- `src/core/agents/`: `claude.ts` implements `Agent` from `types.ts` and is built by `factory.ts`; `stream-utils.ts` and `managed-process.ts` own streaming and process lifecycle. Claude is the only agent.
 - `src/core/config.ts`: `~/.gnhf/config.yml` loading; CLI flags override config.
 
 ## Invariants
@@ -29,7 +29,6 @@ Releases are automated via release-please; never hand-edit `CHANGELOG.md` or `.r
 - All git calls go through `execFileSync` with explicit argv in `src/core/git.ts`; add a `git.injection.test.ts` case whenever new user input flows into git args.
 - Worktree preservation (README "Worktree Mode") must hold on every exit path, including the `process.on("exit")` fallback and the force-exit timeout.
 - A sleep inhibitor that fails to start or confirm must never abort a run.
-- Raw ACP command specs are redacted to `acp:custom`/`custom` in debug logs, errors, and telemetry.
 - `providerResumeWait` in the orchestrator is the single owner of what a provider-reported reset time is worth.
 - Telemetry (`src/core/telemetry.ts`) sends one pageview at start and one `run` event at the end - never per-iteration, and never `cwd`, branch slug, prompt content, or anything identifying a user or repo. User-facing telemetry docs cover only the `GNHF_TELEMETRY=0` opt-out and that data is anonymous.
 

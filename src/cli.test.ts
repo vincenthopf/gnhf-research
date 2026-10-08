@@ -16,27 +16,6 @@ import type { Config } from "./core/config.js";
 import { stripExitSummaryAnsi } from "./core/exit-summary.js";
 import type { RunInfo } from "./core/run.js";
 
-const TEST_AGENT_NAMES = [
-  "claude",
-  "codex",
-  "rovodev",
-  "opencode",
-  "copilot",
-  "pi",
-  "cursor",
-];
-const TEST_IS_AGENT_SPEC = (name: string) => {
-  if (TEST_AGENT_NAMES.includes(name)) return true;
-  if (!name.startsWith("acp:")) return false;
-  const target = name.slice("acp:".length);
-  return target.length > 0 && target.trim() === target;
-};
-const TEST_REDACT_AGENT_SPEC = (name: string) => {
-  if (!name.startsWith("acp:")) return name;
-  const target = name.slice("acp:".length);
-  return /^[A-Za-z0-9][A-Za-z0-9._:-]*$/.test(target) ? name : "acp:custom";
-};
-
 const stubRunInfo: RunInfo = {
   runId: "run-abc",
   runDir: "/repo/.gnhf/runs/run-abc",
@@ -111,7 +90,7 @@ async function runCliWithMocks(
 
   const loadConfig = vi.fn(() => config);
   const createAgent =
-    overrides.createAgent ?? vi.fn(() => ({ name: config.agent }));
+    overrides.createAgent ?? vi.fn(() => ({ name: "claude" }));
   const appendDebugLog = overrides.appendDebugLog ?? vi.fn();
   const initDebugLog = overrides.initDebugLog ?? vi.fn();
   const readStdinText =
@@ -171,9 +150,6 @@ async function runCliWithMocks(
 
   vi.resetModules();
   vi.doMock("./core/config.js", () => ({
-    AGENT_NAMES: TEST_AGENT_NAMES,
-    isAgentSpec: TEST_IS_AGENT_SPEC,
-    redactAgentSpecForLogs: TEST_REDACT_AGENT_SPEC,
     loadConfig,
   }));
   vi.doMock("./core/debug-log.js", () => ({
@@ -395,15 +371,10 @@ async function runSigintCliTest({
 
   vi.resetModules();
   vi.doMock("./core/config.js", () => ({
-    AGENT_NAMES: TEST_AGENT_NAMES,
-    isAgentSpec: TEST_IS_AGENT_SPEC,
-    redactAgentSpecForLogs: TEST_REDACT_AGENT_SPEC,
     loadConfig: vi.fn(() => ({
-      agent: "claude",
       agentPathOverride: {},
       agentModel: {},
       agentArgsOverride: {},
-      acpRegistryOverrides: {},
       maxConsecutiveFailures: 3,
       preventSleep: false,
     })),
@@ -551,15 +522,10 @@ async function runCliResumeWithActualRun(
   vi.resetModules();
   vi.doUnmock("./core/run.js");
   vi.doMock("./core/config.js", () => ({
-    AGENT_NAMES: TEST_AGENT_NAMES,
-    isAgentSpec: TEST_IS_AGENT_SPEC,
-    redactAgentSpecForLogs: TEST_REDACT_AGENT_SPEC,
     loadConfig: vi.fn(() => ({
-      agent: "claude",
       agentPathOverride: {},
       agentModel: {},
       agentArgsOverride: {},
-      acpRegistryOverrides: {},
       ...(opts.liveCommitMessage === undefined
         ? {}
         : { commitMessage: opts.liveCommitMessage }),
@@ -674,147 +640,71 @@ async function runCliResumeWithActualRun(
 }
 
 describe("cli", () => {
-  it("passes per-agent config through to agent creation", async () => {
+  it("passes claude config through to agent creation", async () => {
     const { createAgent } = await runCliWithMocks(["ship it"], {
-      agent: "codex",
-      agentPathOverride: {},
+      agentPathOverride: { claude: "/opt/bin/claude-wrapper" },
       agentModel: {},
       agentArgsOverride: {
-        codex: ["-m", "gpt-5.4", "--full-auto"],
+        claude: ["--add-dir", "../shared"],
       },
-      acpRegistryOverrides: {},
       maxConsecutiveFailures: 3,
       preventSleep: false,
     });
 
     expect(createAgent).toHaveBeenCalledWith(
-      "codex",
-      stubRunInfo,
-      undefined,
-      ["-m", "gpt-5.4", "--full-auto"],
-      { includeStopField: false, acpRegistryOverrides: {} },
+      "/opt/bin/claude-wrapper",
+      ["--add-dir", "../shared"],
+      { includeStopField: false },
     );
   });
 
   it("resolves the model from agentModel config and lets --model override it", async () => {
     const { createAgent } = await runCliWithMocks(["ship it"], {
-      agent: "codex",
       agentPathOverride: {},
-      agentModel: { codex: "gpt-5.4" },
+      agentModel: { claude: "sonnet" },
       agentArgsOverride: {},
-      acpRegistryOverrides: {},
       maxConsecutiveFailures: 3,
       preventSleep: false,
     });
 
-    expect(createAgent).toHaveBeenCalledWith(
-      "codex",
-      stubRunInfo,
-      undefined,
-      undefined,
-      { includeStopField: false, acpRegistryOverrides: {}, model: "gpt-5.4" },
-    );
+    expect(createAgent).toHaveBeenCalledWith(undefined, undefined, {
+      includeStopField: false,
+      model: "sonnet",
+    });
 
-    const flagResult = await runCliWithMocks(
-      ["--model", "gpt-5.5", "ship it"],
-      {
-        agent: "codex",
-        agentPathOverride: {},
-        agentModel: { codex: "gpt-5.4" },
-        agentArgsOverride: {},
-        acpRegistryOverrides: {},
-        maxConsecutiveFailures: 3,
-        preventSleep: false,
-      },
-    );
+    const flagResult = await runCliWithMocks(["--model", "opus", "ship it"], {
+      agentPathOverride: {},
+      agentModel: { claude: "sonnet" },
+      agentArgsOverride: {},
+      maxConsecutiveFailures: 3,
+      preventSleep: false,
+    });
 
-    expect(flagResult.createAgent).toHaveBeenCalledWith(
-      "codex",
-      stubRunInfo,
-      undefined,
-      undefined,
-      { includeStopField: false, acpRegistryOverrides: {}, model: "gpt-5.5" },
-    );
-  });
-
-  it("rejects --model for ACP targets", async () => {
-    await expect(
-      runCliWithMocks(["--model", "gemini-2.5-pro", "ship it"], {
-        agent: "acp:gemini",
-        agentPathOverride: {},
-        agentModel: {},
-        agentArgsOverride: {},
-        acpRegistryOverrides: {},
-        maxConsecutiveFailures: 3,
-        preventSleep: false,
-      }),
-    ).rejects.toThrow("process.exit unexpectedly called with 1");
+    expect(flagResult.createAgent).toHaveBeenCalledWith(undefined, undefined, {
+      includeStopField: false,
+      model: "opus",
+    });
   });
 
   it.each(["", "   "])("rejects blank --model values", async (model) => {
     await expect(
       runCliWithMocks(["--model", model, "ship it"], {
-        agent: "opencode",
         agentPathOverride: {},
-        agentModel: { opencode: "openai/gpt-5" },
+        agentModel: { claude: "sonnet" },
         agentArgsOverride: {},
-        acpRegistryOverrides: {},
         maxConsecutiveFailures: 3,
         preventSleep: false,
       }),
     ).rejects.toThrow("process.exit unexpectedly called with 1");
-  });
-
-  it.each([
-    ["opencode", "gpt-5"],
-    ["rovodev", "claude-sonnet-4-5"],
-  ] as const)(
-    "rejects unsupported --model for --agent %s",
-    async (agent, model) => {
-      await expect(
-        runCliWithMocks(["--model", model, "ship it"], {
-          agent,
-          agentPathOverride: {},
-          agentModel: {},
-          agentArgsOverride: {},
-          acpRegistryOverrides: {},
-          maxConsecutiveFailures: 3,
-          preventSleep: false,
-        }),
-      ).rejects.toThrow("process.exit unexpectedly called with 1");
-    },
-  );
-
-  it("buckets raw ACP command specs in telemetry", async () => {
-    const { telemetry } = await runCliWithMocks(["ship it"], {
-      agent: "acp:./bin/dev-acp --profile ci --token secret",
-      agentPathOverride: {},
-      agentModel: {},
-      agentArgsOverride: {},
-      acpRegistryOverrides: {},
-      maxConsecutiveFailures: 3,
-      preventSleep: false,
-    });
-
-    expect(telemetry.pageview).toHaveBeenCalledWith("/run", {
-      agent: "acp:custom",
-      mode: "new",
-    });
-    expect(telemetry.track).toHaveBeenCalledWith(
-      "run",
-      expect.objectContaining({ agent: "acp:custom" }),
-    );
   });
 
   it("prints a permanent exit summary after the run completes", async () => {
     const { stdoutWriteCalls } = await runCliWithMocks(
       ["refactor auth flow"],
       {
-        agent: "opencode",
         agentPathOverride: {},
         agentModel: {},
         agentArgsOverride: {},
-        acpRegistryOverrides: {},
         maxConsecutiveFailures: 3,
         preventSleep: false,
       },
@@ -847,7 +737,7 @@ describe("cli", () => {
     const stdout = stdoutWriteCalls.map(([chunk]) => String(chunk)).join("");
     expect(stdout).toContain("gnhf wrapped");
     expect(stdout).toContain(
-      "opencode worked for 47m 12s on gnhf/refactor-auth-flow",
+      "claude worked for 47m 12s on gnhf/refactor-auth-flow",
     );
     expect(stdout).toContain("branch diff");
     expect(stdout).toContain("6 commits");
@@ -862,11 +752,9 @@ describe("cli", () => {
       await runCliWithMocks(
         ["ship it"],
         {
-          agent: "claude",
           agentPathOverride: {},
           agentModel: {},
           agentArgsOverride: {},
-          acpRegistryOverrides: {},
           maxConsecutiveFailures: 3,
           preventSleep: false,
         },
@@ -889,110 +777,29 @@ describe("cli", () => {
     );
   });
 
-  it("redacts raw ACP command specs in the exit summary", async () => {
-    const rawAgent = "acp:./bin/dev-acp --profile ci --token secret";
-    const { stdoutWriteCalls } = await runCliWithMocks(
-      ["--agent", rawAgent, "ship it"],
-      {
-        agent: rawAgent,
-        agentPathOverride: {},
-        agentModel: {},
-        agentArgsOverride: {},
-        acpRegistryOverrides: {},
-        maxConsecutiveFailures: 3,
-        preventSleep: false,
-      },
-    );
-
-    const stdout = stdoutWriteCalls.map(([chunk]) => String(chunk)).join("");
-    expect(stdout).toContain("acp:custom worked");
-    expect(stdout).not.toContain("secret");
-    expect(stdout).not.toContain(rawAgent);
-  });
-
-  it("redacts raw ACP command specs in run start debug logs", async () => {
-    const rawAgent = "acp:./bin/dev-acp --profile ci --token secret";
-    const { appendDebugLog } = await runCliWithMocks(
-      ["--agent", rawAgent, "ship it"],
-      {
-        agent: rawAgent,
-        agentPathOverride: {},
-        agentModel: {},
-        agentArgsOverride: {},
-        acpRegistryOverrides: {},
-        maxConsecutiveFailures: 3,
-        preventSleep: false,
-      },
-    );
-
-    expect(appendDebugLog).toHaveBeenCalledWith(
-      "run:start",
-      expect.objectContaining({
-        agent: "acp:custom",
-        args: ["--agent", "acp:custom", "ship it"],
-      }),
-    );
-    expect(JSON.stringify(appendDebugLog.mock.calls)).not.toContain("secret");
-  });
-
-  it("redacts raw ACP command specs in equals-form agent args", async () => {
-    const rawAgent = "acp:./bin/dev-acp --profile ci --token secret";
-    const { appendDebugLog } = await runCliWithMocks(
-      [`--agent=${rawAgent}`, "ship it"],
-      {
-        agent: rawAgent,
-        agentPathOverride: {},
-        agentModel: {},
-        agentArgsOverride: {},
-        acpRegistryOverrides: {},
-        maxConsecutiveFailures: 3,
-        preventSleep: false,
-      },
-    );
-
-    expect(appendDebugLog).toHaveBeenCalledWith(
-      "run:start",
-      expect.objectContaining({
-        args: ["--agent=acp:custom", "ship it"],
-      }),
-    );
-    expect(JSON.stringify(appendDebugLog.mock.calls)).not.toContain("secret");
-  });
-
   it("threads includeStopField=true into agent creation when --stop-when is set", async () => {
     const { createAgent } = await runCliWithMocks(
       ["ship it", "--stop-when", "all tests pass"],
       {
-        agent: "codex",
         agentPathOverride: {},
         agentModel: {},
         agentArgsOverride: {},
-        acpRegistryOverrides: {},
         maxConsecutiveFailures: 3,
         preventSleep: false,
       },
     );
 
-    expect(createAgent).toHaveBeenCalledWith(
-      "codex",
-      stubRunInfo,
-      undefined,
-      undefined,
-      {
-        includeStopField: true,
-        stopWhen: "all tests pass",
-        acpRegistryOverrides: {},
-      },
-    );
+    expect(createAgent).toHaveBeenCalledWith(undefined, undefined, {
+      includeStopField: true,
+      stopWhen: "all tests pass",
+    });
   });
 
   it("threads commit message fields into run setup and agent creation", async () => {
     const { createAgent, setupRun } = await runCliWithMocks(["ship it"], {
-      agent: "codex",
       agentPathOverride: {},
       agentModel: {},
       agentArgsOverride: {},
-      acpRegistryOverrides: {},
       commitMessage: CONVENTIONAL_COMMIT_MESSAGE,
       maxConsecutiveFailures: 3,
       preventSleep: false,
@@ -1027,11 +834,9 @@ describe("cli", () => {
       expectedSchemaOptions,
     );
     expect(createAgent).toHaveBeenCalledWith(
-      "codex",
-      stubRunInfo,
       undefined,
       undefined,
-      { ...expectedSchemaOptions, acpRegistryOverrides: {} },
+      expectedSchemaOptions,
     );
   });
 
@@ -1039,11 +844,9 @@ describe("cli", () => {
     const { createAgent, setupRun } = await runCliWithMocks(
       ["ship it", "--stop-when", "all checks pass"],
       {
-        agent: "codex",
         agentPathOverride: {},
         agentModel: {},
         agentArgsOverride: {},
-        acpRegistryOverrides: {},
         commitMessage: CONVENTIONAL_COMMIT_MESSAGE,
         maxConsecutiveFailures: 3,
         preventSleep: false,
@@ -1080,11 +883,9 @@ describe("cli", () => {
       expectedSchemaOptions,
     );
     expect(createAgent).toHaveBeenCalledWith(
-      "codex",
-      stubRunInfo,
       undefined,
       undefined,
-      { ...expectedSchemaOptions, acpRegistryOverrides: {} },
+      expectedSchemaOptions,
     );
   });
 
@@ -1092,17 +893,13 @@ describe("cli", () => {
     const { appendDebugLog, createAgent, orchestratorCtor, schema } =
       await runCliResumeWithActualRun([], "all tests pass");
 
-    expect(createAgent).toHaveBeenCalledWith(
-      "claude",
+    expect(orchestratorCtor.mock.calls[0]?.[2]).toEqual(
       expect.objectContaining({ stopWhen: "all tests pass" }),
-      undefined,
-      undefined,
-      {
-        includeStopField: true,
-        stopWhen: "all tests pass",
-        acpRegistryOverrides: {},
-      },
     );
+    expect(createAgent).toHaveBeenCalledWith(undefined, undefined, {
+      includeStopField: true,
+      stopWhen: "all tests pass",
+    });
     expect(orchestratorCtor.mock.calls[0]?.[6]).toMatchObject({
       stopWhen: "all tests pass",
     });
@@ -1157,13 +954,12 @@ describe("cli", () => {
       await runCliResumeWithActualRun([]);
 
     expect(stopWhenExists).toBe(false);
-    expect(createAgent).toHaveBeenCalledWith(
-      "claude",
+    expect(orchestratorCtor.mock.calls[0]?.[2]).toEqual(
       expect.objectContaining({ stopWhen: undefined }),
-      undefined,
-      undefined,
-      { includeStopField: false, acpRegistryOverrides: {} },
     );
+    expect(createAgent).toHaveBeenCalledWith(undefined, undefined, {
+      includeStopField: false,
+    });
     expect(orchestratorCtor.mock.calls[0]?.[6]).toEqual({
       maxIterations: undefined,
       maxTokens: undefined,
@@ -1182,13 +978,12 @@ describe("cli", () => {
         storedCommitMessage: "default",
       });
 
-    expect(createAgent).toHaveBeenCalledWith(
-      "claude",
+    expect(orchestratorCtor.mock.calls[0]?.[2]).toEqual(
       expect.objectContaining({ commitMessage: undefined }),
-      undefined,
-      undefined,
-      { includeStopField: false, acpRegistryOverrides: {} },
     );
+    expect(createAgent).toHaveBeenCalledWith(undefined, undefined, {
+      includeStopField: false,
+    });
     expect(orchestratorCtor.mock.calls[0]?.[0]).toMatchObject({
       commitMessage: undefined,
     });
@@ -1204,9 +999,10 @@ describe("cli", () => {
         storedCommitMessage: "conventional",
       });
 
-    expect(createAgent).toHaveBeenCalledWith(
-      "claude",
+    expect(orchestratorCtor.mock.calls[0]?.[2]).toEqual(
       expect.objectContaining({ commitMessage: CONVENTIONAL_COMMIT_MESSAGE }),
+    );
+    expect(createAgent).toHaveBeenCalledWith(
       undefined,
       undefined,
       expect.objectContaining({
@@ -1236,11 +1032,9 @@ describe("cli", () => {
         "90m",
       ],
       {
-        agent: "claude",
         agentPathOverride: {},
         agentModel: {},
         agentArgsOverride: {},
-        acpRegistryOverrides: {},
         maxConsecutiveFailures: 3,
         preventSleep: false,
       },
@@ -1259,11 +1053,9 @@ describe("cli", () => {
     const { orchestratorCtor } = await runCliWithMocks(
       ["ship it", "--fallback-model", "claude-haiku"],
       {
-        agent: "claude",
         agentPathOverride: {},
         agentModel: {},
         agentArgsOverride: {},
-        acpRegistryOverrides: {},
         maxConsecutiveFailures: 3,
         preventSleep: false,
       },
@@ -1280,11 +1072,9 @@ describe("cli", () => {
 
   it("passes push mode to the orchestrator when --push is set", async () => {
     const { orchestratorCtor } = await runCliWithMocks(["ship it", "--push"], {
-      agent: "claude",
       agentPathOverride: {},
       agentModel: {},
       agentArgsOverride: {},
-      acpRegistryOverrides: {},
       maxConsecutiveFailures: 3,
       preventSleep: false,
     });
@@ -1303,11 +1093,9 @@ describe("cli", () => {
     const { rendererCtor } = await runCliWithMocks(
       ["ship it", "--meteor-frequency", "3"],
       {
-        agent: "claude",
         agentPathOverride: {},
         agentModel: {},
         agentArgsOverride: {},
-        acpRegistryOverrides: {},
         maxConsecutiveFailures: 3,
         preventSleep: false,
       },
@@ -1319,11 +1107,9 @@ describe("cli", () => {
 
   it("defaults meteor frequency to 3", async () => {
     const { rendererCtor } = await runCliWithMocks(["ship it"], {
-      agent: "claude",
       agentPathOverride: {},
       agentModel: {},
       agentArgsOverride: {},
-      acpRegistryOverrides: {},
       maxConsecutiveFailures: 3,
       preventSleep: false,
     });
@@ -1332,20 +1118,18 @@ describe("cli", () => {
     expect(rendererCtor.mock.calls[0]?.[4]).toEqual({ meteorFrequency: 3 });
   });
 
-  it("uses codex as the mock mode agent label", async () => {
+  it("uses claude as the mock mode agent label", async () => {
     const { loadConfig, rendererCtor } = await runCliWithMocks(["--mock"], {
-      agent: "claude",
       agentPathOverride: {},
       agentModel: {},
       agentArgsOverride: {},
-      acpRegistryOverrides: {},
       maxConsecutiveFailures: 3,
       preventSleep: false,
     });
 
     expect(loadConfig).not.toHaveBeenCalled();
     expect(rendererCtor).toHaveBeenCalledTimes(1);
-    expect(rendererCtor.mock.calls[0]?.[2]).toBe("codex");
+    expect(rendererCtor.mock.calls[0]?.[2]).toBe("claude");
     expect(rendererCtor.mock.calls[0]?.[4]).toEqual({ meteorFrequency: 3 });
   });
 
@@ -1354,11 +1138,9 @@ describe("cli", () => {
     const { setupRun, orchestratorCtor } = await runCliWithMocks(
       ["ship it", "--current-branch"],
       {
-        agent: "claude",
         agentPathOverride: {},
         agentModel: {},
         agentArgsOverride: {},
-        acpRegistryOverrides: {},
         maxConsecutiveFailures: 3,
         preventSleep: false,
       },
@@ -1397,11 +1179,9 @@ describe("cli", () => {
       const { setupRun, orchestratorCtor } = await runCliWithMocks(
         ["ship it", "--current-branch"],
         {
-          agent: "claude",
           agentPathOverride: {},
           agentModel: {},
           agentArgsOverride: {},
-          acpRegistryOverrides: {},
           maxConsecutiveFailures: 3,
           preventSleep: false,
         },
@@ -1451,11 +1231,9 @@ describe("cli", () => {
       await runCliWithMocks(
         ["ship it", "--current-branch"],
         {
-          agent: "claude",
           agentPathOverride: {},
           agentModel: {},
           agentArgsOverride: {},
-          acpRegistryOverrides: {},
           maxConsecutiveFailures: 3,
           preventSleep: false,
         },
@@ -1475,11 +1253,9 @@ describe("cli", () => {
   it("rejects combining --current-branch and --worktree", async () => {
     await expect(
       runCliWithMocks(["ship it", "--current-branch", "--worktree"], {
-        agent: "claude",
         agentPathOverride: {},
         agentModel: {},
         agentArgsOverride: {},
-        acpRegistryOverrides: {},
         maxConsecutiveFailures: 3,
         preventSleep: false,
       }),
@@ -1489,24 +1265,20 @@ describe("cli", () => {
   it("treats --prevent-sleep as a runtime override without passing it to config bootstrap", async () => {
     const { loadConfig, orchestratorCtor, startSleepPrevention } =
       await runCliWithMocks(["ship it", "--prevent-sleep", "off"], {
-        agent: "claude",
         agentPathOverride: {},
         agentModel: {},
         agentArgsOverride: {},
-        acpRegistryOverrides: {},
         maxConsecutiveFailures: 3,
         preventSleep: false,
       });
 
-    expect(loadConfig).toHaveBeenCalledWith({});
+    expect(loadConfig).toHaveBeenCalledWith();
     expect(startSleepPrevention).not.toHaveBeenCalled();
     expect(orchestratorCtor).toHaveBeenCalledTimes(1);
     expect(orchestratorCtor.mock.calls[0]?.[0]).toEqual({
-      agent: "claude",
       agentPathOverride: {},
       agentModel: {},
       agentArgsOverride: {},
-      acpRegistryOverrides: {},
       maxConsecutiveFailures: 3,
       preventSleep: false,
     });
@@ -1524,11 +1296,9 @@ describe("cli", () => {
     const { stdoutWriteCalls } = await runCliWithMocks(
       ["ship it"],
       {
-        agent: "claude",
         agentPathOverride: {},
         agentModel: {},
         agentArgsOverride: {},
-        acpRegistryOverrides: {},
         maxConsecutiveFailures: 3,
         preventSleep: true,
       },
@@ -1551,11 +1321,9 @@ describe("cli", () => {
     const { stdoutWriteCalls, orchestratorCtor } = await runCliWithMocks(
       ["ship it"],
       {
-        agent: "claude",
         agentPathOverride: {},
         agentModel: {},
         agentArgsOverride: {},
-        acpRegistryOverrides: {},
         maxConsecutiveFailures: 3,
         preventSleep: true,
       },
@@ -1586,11 +1354,9 @@ describe("cli", () => {
     const { consoleErrorCalls, stdoutWriteCalls } = await runCliWithMocks(
       ["ship it"],
       {
-        agent: "claude",
         agentPathOverride: {},
         agentModel: {},
         agentArgsOverride: {},
-        acpRegistryOverrides: {},
         maxConsecutiveFailures: 3,
         preventSleep: true,
       },
@@ -1613,11 +1379,9 @@ describe("cli", () => {
       runCliWithMocks(
         ["ship it"],
         {
-          agent: "claude",
           agentPathOverride: {},
           agentModel: {},
           agentArgsOverride: {},
-          acpRegistryOverrides: {},
           maxConsecutiveFailures: 3,
           preventSleep: true,
         },
@@ -1648,11 +1412,9 @@ describe("cli", () => {
     await runCliWithMocks(
       [],
       {
-        agent: "claude",
         agentPathOverride: {},
         agentModel: {},
         agentArgsOverride: {},
-        acpRegistryOverrides: {},
         maxConsecutiveFailures: 3,
         preventSleep: true,
       },
@@ -1685,11 +1447,9 @@ describe("cli", () => {
       const { orchestratorCtor } = await runCliWithMocks(
         [],
         {
-          agent: "claude",
           agentPathOverride: {},
           agentModel: {},
           agentArgsOverride: {},
-          acpRegistryOverrides: {},
           maxConsecutiveFailures: 3,
           preventSleep: true,
         },
@@ -1727,11 +1487,9 @@ describe("cli", () => {
     const { orchestratorCtor } = await runCliWithMocks(
       [],
       {
-        agent: "claude",
         agentPathOverride: {},
         agentModel: {},
         agentArgsOverride: {},
-        acpRegistryOverrides: {},
         maxConsecutiveFailures: 3,
         preventSleep: true,
       },
@@ -1771,11 +1529,9 @@ describe("cli", () => {
       await runCliWithMocks(
         [],
         {
-          agent: "claude",
           agentPathOverride: {},
           agentModel: {},
           agentArgsOverride: {},
-          acpRegistryOverrides: {},
           maxConsecutiveFailures: 3,
           preventSleep: true,
         },
@@ -1809,11 +1565,9 @@ describe("cli", () => {
       const { orchestratorCtor } = await runCliWithMocks(
         [],
         {
-          agent: "claude",
           agentPathOverride: {},
           agentModel: {},
           agentArgsOverride: {},
-          acpRegistryOverrides: {},
           maxConsecutiveFailures: 3,
           preventSleep: true,
         },
@@ -1842,11 +1596,9 @@ describe("cli", () => {
 
   it("signals Linux sleep-prevention re-exec readiness before loading config", async () => {
     const loadConfig = vi.fn(() => ({
-      agent: "claude" as const,
       agentPathOverride: {},
       agentModel: {},
       agentArgsOverride: {},
-      acpRegistryOverrides: {},
       maxConsecutiveFailures: 3,
       preventSleep: true,
     }));
@@ -1859,9 +1611,6 @@ describe("cli", () => {
 
     vi.resetModules();
     vi.doMock("./core/config.js", () => ({
-      AGENT_NAMES: TEST_AGENT_NAMES,
-      isAgentSpec: TEST_IS_AGENT_SPEC,
-      redactAgentSpecForLogs: TEST_REDACT_AGENT_SPEC,
       loadConfig,
     }));
     vi.doMock("./core/debug-log.js", () => ({
@@ -2012,15 +1761,10 @@ describe("cli", () => {
     });
     vi.doMock("node:readline", () => ({ createInterface }));
     vi.doMock("./core/config.js", () => ({
-      AGENT_NAMES: TEST_AGENT_NAMES,
-      isAgentSpec: TEST_IS_AGENT_SPEC,
-      redactAgentSpecForLogs: TEST_REDACT_AGENT_SPEC,
       loadConfig: vi.fn(() => ({
-        agent: "claude",
         agentPathOverride: {},
         agentModel: {},
         agentArgsOverride: {},
-        acpRegistryOverrides: {},
         maxConsecutiveFailures: 3,
         preventSleep: true,
       })),
@@ -2152,15 +1896,10 @@ describe("cli", () => {
       };
     });
     vi.doMock("./core/config.js", () => ({
-      AGENT_NAMES: TEST_AGENT_NAMES,
-      isAgentSpec: TEST_IS_AGENT_SPEC,
-      redactAgentSpecForLogs: TEST_REDACT_AGENT_SPEC,
       loadConfig: vi.fn(() => ({
-        agent: "claude",
         agentPathOverride: {},
         agentModel: {},
         agentArgsOverride: {},
-        acpRegistryOverrides: {},
         maxConsecutiveFailures: 3,
         preventSleep: true,
       })),
@@ -2288,15 +2027,10 @@ describe("cli", () => {
       createInterface: vi.fn(() => readlineInterface),
     }));
     vi.doMock("./core/config.js", () => ({
-      AGENT_NAMES: TEST_AGENT_NAMES,
-      isAgentSpec: TEST_IS_AGENT_SPEC,
-      redactAgentSpecForLogs: TEST_REDACT_AGENT_SPEC,
       loadConfig: vi.fn(() => ({
-        agent: "claude",
         agentPathOverride: {},
         agentModel: {},
         agentArgsOverride: {},
-        acpRegistryOverrides: {},
         maxConsecutiveFailures: 3,
         preventSleep: true,
       })),
@@ -2419,15 +2153,10 @@ describe("cli", () => {
       createInterface: vi.fn(() => readlineInterface),
     }));
     vi.doMock("./core/config.js", () => ({
-      AGENT_NAMES: TEST_AGENT_NAMES,
-      isAgentSpec: TEST_IS_AGENT_SPEC,
-      redactAgentSpecForLogs: TEST_REDACT_AGENT_SPEC,
       loadConfig: vi.fn(() => ({
-        agent: "claude",
         agentPathOverride: {},
         agentModel: {},
         agentArgsOverride: {},
-        acpRegistryOverrides: {},
         maxConsecutiveFailures: 3,
         preventSleep: true,
       })),
@@ -2547,15 +2276,10 @@ describe("cli", () => {
       })),
     }));
     vi.doMock("./core/config.js", () => ({
-      AGENT_NAMES: TEST_AGENT_NAMES,
-      isAgentSpec: TEST_IS_AGENT_SPEC,
-      redactAgentSpecForLogs: TEST_REDACT_AGENT_SPEC,
       loadConfig: vi.fn(() => ({
-        agent: "claude",
         agentPathOverride: {},
         agentModel: {},
         agentArgsOverride: {},
-        acpRegistryOverrides: {},
         maxConsecutiveFailures: 3,
         preventSleep: true,
       })),
@@ -2668,15 +2392,10 @@ describe("cli", () => {
       })),
     }));
     vi.doMock("./core/config.js", () => ({
-      AGENT_NAMES: TEST_AGENT_NAMES,
-      isAgentSpec: TEST_IS_AGENT_SPEC,
-      redactAgentSpecForLogs: TEST_REDACT_AGENT_SPEC,
       loadConfig: vi.fn(() => ({
-        agent: "claude",
         agentPathOverride: {},
         agentModel: {},
         agentArgsOverride: {},
-        acpRegistryOverrides: {},
         maxConsecutiveFailures: 3,
         preventSleep: false,
       })),
@@ -2794,11 +2513,9 @@ describe("cli", () => {
     const cliPromise = runCliWithMocks(
       ["ship it"],
       {
-        agent: "claude",
         agentPathOverride: {},
         agentModel: {},
         agentArgsOverride: {},
-        acpRegistryOverrides: {},
         maxConsecutiveFailures: 3,
         preventSleep: false,
       },
@@ -2852,15 +2569,10 @@ describe("cli", () => {
 
     vi.resetModules();
     vi.doMock("./core/config.js", () => ({
-      AGENT_NAMES: TEST_AGENT_NAMES,
-      isAgentSpec: TEST_IS_AGENT_SPEC,
-      redactAgentSpecForLogs: TEST_REDACT_AGENT_SPEC,
       loadConfig: vi.fn(() => ({
-        agent: "claude",
         agentPathOverride: {},
         agentModel: {},
         agentArgsOverride: {},
-        acpRegistryOverrides: {},
         maxConsecutiveFailures: 3,
         preventSleep: false,
       })),
@@ -3002,15 +2714,10 @@ describe("cli", () => {
 
     vi.resetModules();
     vi.doMock("./core/config.js", () => ({
-      AGENT_NAMES: TEST_AGENT_NAMES,
-      isAgentSpec: TEST_IS_AGENT_SPEC,
-      redactAgentSpecForLogs: TEST_REDACT_AGENT_SPEC,
       loadConfig: vi.fn(() => ({
-        agent: "claude",
         agentPathOverride: {},
         agentModel: {},
         agentArgsOverride: {},
-        acpRegistryOverrides: {},
         maxConsecutiveFailures: 3,
         preventSleep: false,
       })),
@@ -3112,11 +2819,9 @@ describe("cli", () => {
     const { consoleErrorCalls } = await runCliWithMocks(
       ["ship it"],
       {
-        agent: "claude",
         agentPathOverride: {},
         agentModel: {},
         agentArgsOverride: {},
-        acpRegistryOverrides: {},
         maxConsecutiveFailures: 3,
         preventSleep: false,
       },
@@ -3180,15 +2885,10 @@ describe("cli", () => {
 
     vi.resetModules();
     vi.doMock("./core/config.js", () => ({
-      AGENT_NAMES: TEST_AGENT_NAMES,
-      isAgentSpec: TEST_IS_AGENT_SPEC,
-      redactAgentSpecForLogs: TEST_REDACT_AGENT_SPEC,
       loadConfig: vi.fn(() => ({
-        agent: "claude",
         agentPathOverride: {},
         agentModel: {},
         agentArgsOverride: {},
-        acpRegistryOverrides: {},
         maxConsecutiveFailures: 3,
         preventSleep: false,
       })),
@@ -3336,15 +3036,10 @@ describe("cli", () => {
 
     vi.resetModules();
     vi.doMock("./core/config.js", () => ({
-      AGENT_NAMES: TEST_AGENT_NAMES,
-      isAgentSpec: TEST_IS_AGENT_SPEC,
-      redactAgentSpecForLogs: TEST_REDACT_AGENT_SPEC,
       loadConfig: vi.fn(() => ({
-        agent: "claude",
         agentPathOverride: {},
         agentModel: {},
         agentArgsOverride: {},
-        acpRegistryOverrides: {},
         maxConsecutiveFailures: 3,
         preventSleep: false,
       })),
@@ -3453,11 +3148,9 @@ describe("cli", () => {
     await runCliWithMocks(
       ["ship it"],
       {
-        agent: "claude",
         agentPathOverride: {},
         agentModel: {},
         agentArgsOverride: {},
-        acpRegistryOverrides: {},
         maxConsecutiveFailures: 3,
         preventSleep: false,
       },
@@ -3480,11 +3173,9 @@ describe("cli", () => {
     await runCliWithMocks(
       ["ship it", "--worktree"],
       {
-        agent: "claude",
         agentPathOverride: {},
         agentModel: {},
         agentArgsOverride: {},
-        acpRegistryOverrides: {},
         maxConsecutiveFailures: 3,
         preventSleep: false,
       },
@@ -3504,11 +3195,9 @@ describe("cli", () => {
     await runCliWithMocks(
       ["ship it", "--worktree"],
       {
-        agent: "claude",
         agentPathOverride: {},
         agentModel: {},
         agentArgsOverride: {},
-        acpRegistryOverrides: {},
         maxConsecutiveFailures: 3,
         preventSleep: false,
       },
@@ -3524,11 +3213,9 @@ describe("cli", () => {
     await runCliWithMocks(
       ["ship it", "--worktree"],
       {
-        agent: "claude",
         agentPathOverride: {},
         agentModel: {},
         agentArgsOverride: {},
-        acpRegistryOverrides: {},
         maxConsecutiveFailures: 3,
         preventSleep: false,
       },
@@ -3574,11 +3261,9 @@ describe("cli", () => {
       const cliPromise = runCliWithMocks(
         ["ship it", "--worktree"],
         {
-          agent: "claude",
           agentPathOverride: {},
           agentModel: {},
           agentArgsOverride: {},
-          acpRegistryOverrides: {},
           maxConsecutiveFailures: 3,
           preventSleep: false,
         },
@@ -3673,11 +3358,9 @@ describe("cli", () => {
       const { orchestratorCtor } = await runCliWithMocks(
         ["ship it", "--worktree"],
         {
-          agent: "claude",
           agentPathOverride: {},
           agentModel: {},
           agentArgsOverride: {},
-          acpRegistryOverrides: {},
           maxConsecutiveFailures: 3,
           preventSleep: false,
         },
@@ -3730,11 +3413,9 @@ describe("cli", () => {
       const { createAgent, orchestratorCtor } = await runCliWithMocks(
         ["ship it", "--worktree", "--stop-when", ""],
         {
-          agent: "claude",
           agentPathOverride: {},
           agentModel: {},
           agentArgsOverride: {},
-          acpRegistryOverrides: {},
           maxConsecutiveFailures: 3,
           preventSleep: false,
         },
@@ -3752,9 +3433,8 @@ describe("cli", () => {
         includeStopField: false,
         clearStopWhen: true,
       });
-      expect(createAgent.mock.calls[0]?.[4]).toEqual({
+      expect(createAgent.mock.calls[0]?.[2]).toEqual({
         includeStopField: false,
-        acpRegistryOverrides: {},
       });
       expect(orchestratorCtor.mock.calls[0]?.[6]).toEqual({
         maxIterations: undefined,
@@ -3796,11 +3476,9 @@ describe("cli", () => {
       const { orchestratorCtor } = await runCliWithMocks(
         ["ship it", "--worktree"],
         {
-          agent: "claude",
           agentPathOverride: {},
           agentModel: {},
           agentArgsOverride: {},
-          acpRegistryOverrides: {},
           maxConsecutiveFailures: 3,
           preventSleep: false,
         },
@@ -3853,11 +3531,9 @@ describe("cli", () => {
       const { createAgent, orchestratorCtor } = await runCliWithMocks(
         ["ship it", "--worktree"],
         {
-          agent: "claude",
           agentPathOverride: {},
           agentModel: {},
           agentArgsOverride: {},
-          acpRegistryOverrides: {},
           maxConsecutiveFailures: 3,
           preventSleep: false,
           commitMessage: CONVENTIONAL_COMMIT_MESSAGE,
@@ -3872,9 +3548,8 @@ describe("cli", () => {
         },
       );
 
-      expect(createAgent.mock.calls[0]?.[4]).toEqual({
+      expect(createAgent.mock.calls[0]?.[2]).toEqual({
         includeStopField: false,
-        acpRegistryOverrides: {},
       });
       expect(orchestratorCtor.mock.calls[0]?.[0]).toEqual(
         expect.objectContaining({ commitMessage: undefined }),

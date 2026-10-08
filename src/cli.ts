@@ -15,14 +15,7 @@ import { basename, dirname, join, resolve } from "node:path";
 import process from "node:process";
 import { createInterface } from "node:readline";
 import { Command, InvalidArgumentError } from "commander";
-import {
-  AGENT_NAMES,
-  isAgentSpec,
-  loadConfig,
-  redactAgentSpecForLogs,
-  type AgentName,
-  type AgentSpec,
-} from "./core/config.js";
+import { loadConfig } from "./core/config.js";
 import {
   appendDebugLog,
   initDebugLog,
@@ -77,11 +70,6 @@ const GNHF_REEXEC_STDIN_PROMPT = "GNHF_REEXEC_STDIN_PROMPT";
 const GNHF_REEXEC_STDIN_PROMPT_FILE = "GNHF_REEXEC_STDIN_PROMPT_FILE";
 const GNHF_REEXEC_STDIN_PROMPT_DIR_PREFIX = "gnhf-stdin-";
 const GNHF_REEXEC_STDIN_PROMPT_FILENAME = "prompt.txt";
-const AGENT_NAME_SET = new Set<string>(AGENT_NAMES);
-const AGENT_NAME_LIST = `"${AGENT_NAMES.slice(0, -1).join('", "')}", or "${
-  AGENT_NAMES[AGENT_NAMES.length - 1]
-}"`;
-const AGENT_SPEC_LIST = `${AGENT_NAME_LIST}, or "acp:<target-or-command>" (e.g. acp:gemini)`;
 
 class PromptSignalError extends Error {
   constructor(public readonly signal: NodeJS.Signals) {
@@ -153,29 +141,12 @@ function parseModel(value: string): string {
   return model;
 }
 
-function isOpenCodeModel(model: string): boolean {
-  const slashIndex = model.indexOf("/");
-  return slashIndex > 0 && slashIndex < model.length - 1;
-}
-
 function humanizeErrorMessage(message: string): string {
   if (message.includes("not a git repository")) {
     return 'This command must be run inside a Git repository. Change into a repo or run "git init" first.';
   }
 
   return message;
-}
-
-function isAgentName(name: string): name is AgentName {
-  return AGENT_NAME_SET.has(name);
-}
-
-function getNativeAgentName(spec: AgentSpec): AgentName | undefined {
-  return isAgentName(spec) ? spec : undefined;
-}
-
-function getTelemetryAgent(spec: AgentSpec): string {
-  return redactAgentSpecForLogs(spec);
 }
 
 function shouldUseColor(): boolean {
@@ -198,27 +169,6 @@ function emptyBranchDiffStats(commitCount: number): BranchDiffStats {
     linesAdded: 0,
     linesDeleted: 0,
   };
-}
-
-function redactDebugArgs(args: string[]): string[] {
-  const redacted = [...args];
-  for (let i = 0; i < redacted.length; i += 1) {
-    const arg = redacted[i];
-    if (arg === "--") break;
-    if (arg === "--agent") {
-      const next = redacted[i + 1];
-      if (next !== undefined) {
-        redacted[i + 1] = redactAgentSpecForLogs(next);
-        i += 1;
-      }
-      continue;
-    }
-    if (arg?.startsWith("--agent=")) {
-      redacted[i] =
-        `--agent=${redactAgentSpecForLogs(arg.slice("--agent=".length))}`;
-    }
-  }
-  return redacted;
 }
 
 function buildSchemaOptions(
@@ -601,12 +551,8 @@ program
   .version(packageVersion)
   .argument("[prompt]", "The objective for the coding agent")
   .option(
-    "--agent <agent>",
-    `Agent to use (${AGENT_NAMES.join(", ")}, or acp:<target-or-command>)`,
-  )
-  .option(
     "--model <model>",
-    "Model for the agent; overrides agentModel.<agent> from config",
+    "Claude model; overrides agentModel.claude from config",
     parseModel,
   )
   .option(
@@ -663,7 +609,6 @@ program
     async (
       promptArg: string | undefined,
       options: {
-        agent?: string;
         model?: string;
         maxIterations?: number;
         maxTokens?: number;
@@ -684,7 +629,7 @@ program
         const renderer = new Renderer(
           mock as unknown as Orchestrator,
           "let's minimize app startup latency without sacrificing any functionality",
-          "codex",
+          "claude",
           () => {
             mock.handleInterrupt();
           },
@@ -707,58 +652,13 @@ program
       let prompt = promptArg;
       let promptFromStdin = false;
 
-      const agentName = options.agent;
-      if (agentName !== undefined && !isAgentSpec(agentName)) {
-        console.error(
-          `Unknown agent: ${options.agent}. Use ${AGENT_SPEC_LIST}.`,
-        );
-        process.exit(1);
-      }
-
-      const loadedConfig = loadConfig(
-        agentName
-          ? {
-              agent: agentName,
-            }
-          : {},
-      );
+      const loadedConfig = loadConfig();
       const config = {
         ...loadedConfig,
         ...(options.preventSleep === undefined
           ? {}
           : { preventSleep: options.preventSleep }),
       };
-      if (!isAgentSpec(config.agent)) {
-        console.error(
-          `Unknown agent: ${config.agent}. Use ${AGENT_SPEC_LIST}.`,
-        );
-        process.exit(1);
-      }
-      const nativeAgent = getNativeAgentName(config.agent);
-      if (options.model !== undefined && nativeAgent === undefined) {
-        console.error("--model is not supported with ACP targets.");
-        process.exit(1);
-      }
-      if (
-        options.model !== undefined &&
-        nativeAgent === "opencode" &&
-        !isOpenCodeModel(options.model)
-      ) {
-        console.error("--model for --agent opencode must use provider/model.");
-        process.exit(1);
-      }
-      if (options.model !== undefined && nativeAgent === "rovodev") {
-        console.error(
-          "--model is not supported with --agent rovodev. Set agent.modelId in Rovo Dev settings instead.",
-        );
-        process.exit(1);
-      }
-      if (options.fallbackModel !== undefined && config.agent !== "claude") {
-        console.error(
-          "--fallback-model is only supported with --agent claude.",
-        );
-        process.exit(1);
-      }
 
       initDefaultTelemetry({
         app: "gnhf",
@@ -1040,7 +940,7 @@ program
               ? "resume"
               : "new";
 
-      const telemetryAgent = getTelemetryAgent(config.agent);
+      const telemetryAgent = "claude";
       telemetry.pageview("/run", {
         agent: telemetryAgent,
         mode: runMode,
@@ -1048,10 +948,10 @@ program
 
       initDebugLog(runInfo.logPath);
       appendDebugLog("run:start", {
-        args: redactDebugArgs(process.argv.slice(2)),
+        args: process.argv.slice(2),
         runId: runInfo.runId,
         runDir: runInfo.runDir,
-        agent: redactAgentSpecForLogs(config.agent),
+        agent: telemetryAgent,
         promptLength: prompt.length,
         promptFromStdin,
         startIteration,
@@ -1062,9 +962,7 @@ program
         stopWhen: effectiveStopWhen,
         commitMessage: effectiveCommitMessage,
         preventSleep: config.preventSleep,
-        agentArgsOverride: getNativeAgentName(config.agent)
-          ? config.agentArgsOverride?.[getNativeAgentName(config.agent)!]
-          : undefined,
+        agentArgsOverride: config.agentArgsOverride.claude,
         worktree: options.worktree,
         worktreePath,
         currentBranch: options.currentBranch,
@@ -1074,18 +972,13 @@ program
         gnhfVersion: packageVersion,
       });
 
-      const model =
-        options.model ??
-        (nativeAgent ? config.agentModel?.[nativeAgent] : undefined);
+      const model = options.model ?? config.agentModel.claude;
       const agent = createAgent(
-        config.agent,
-        runInfo,
-        nativeAgent ? config.agentPathOverride[nativeAgent] : undefined,
-        nativeAgent ? config.agentArgsOverride?.[nativeAgent] : undefined,
+        config.agentPathOverride.claude,
+        config.agentArgsOverride.claude,
         {
           ...schemaOptions,
-          acpRegistryOverrides: config.acpRegistryOverrides,
-          model,
+          ...(model === undefined ? {} : { model }),
         },
       );
       const orchestrator = new Orchestrator(
@@ -1144,7 +1037,7 @@ program
       const renderer = new Renderer(
         orchestrator,
         prompt,
-        config.agent,
+        agent.name,
         handleSigInt,
         { meteorFrequency: options.meteorFrequency },
       );
@@ -1246,7 +1139,7 @@ program
         }
 
         const exitSummary = renderExitSummary({
-          agentName: redactAgentSpecForLogs(config.agent),
+          agentName: agent.name,
           branchName: finalBranchName,
           elapsedMs: Date.now() - finalState.startTime.getTime(),
           status: finalState.status,
