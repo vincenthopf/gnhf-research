@@ -108,6 +108,34 @@ describe("createAgent", () => {
     });
   });
 
+  it("hands ClaudeAgent the research fields only for the research workflow", () => {
+    createAgent(undefined, undefined, {
+      includeStopField: false,
+      effort: "medium",
+      workflow: "research",
+    });
+    const researchSchema = vi.mocked(ClaudeAgent).mock.lastCall?.[0] as {
+      schema: { required: string[] };
+    };
+    expect(researchSchema.schema.required).toEqual([
+      ...noStopSchema.required,
+      "evidence_origin",
+      "goals_changed",
+      "contracts_run",
+      "boundary",
+    ]);
+
+    createAgent(undefined, undefined, {
+      includeStopField: false,
+      effort: "medium",
+      workflow: "default",
+    });
+    const defaultDeps = vi.mocked(ClaudeAgent).mock.lastCall?.[0] as {
+      schema: unknown;
+    };
+    expect(defaultDeps.schema).toEqual(noStopSchema);
+  });
+
   it("defaults the model to Opus 5.5", () => {
     expect(DEFAULT_CLAUDE_MODEL).toBe("claude-opus-5-5");
   });

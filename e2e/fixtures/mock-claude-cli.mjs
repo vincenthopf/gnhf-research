@@ -14,6 +14,16 @@ const mode = process.env.GNHF_MOCK_CLAUDE_MODE ?? "success";
 const args = process.argv.slice(2);
 const promptIndex = args.indexOf("-p");
 const prompt = promptIndex === -1 ? "" : (args[promptIndex + 1] ?? "");
+const schemaIndex = args.indexOf("--json-schema");
+const schema = schemaIndex === -1 ? "" : (args[schemaIndex + 1] ?? "");
+const researchOutput = schema.includes("evidence_origin")
+  ? {
+      evidence_origin: "executed",
+      goals_changed: ["G1"],
+      contracts_run: [],
+      boundary: "mock boundary",
+    }
+  : {};
 
 function appendLog(event, details = {}) {
   const logPath = process.env.GNHF_MOCK_CLAUDE_LOG_PATH;
@@ -51,6 +61,7 @@ function writeResult(summary) {
         summary,
         key_changes_made: ["README.md"],
         key_learnings: ["mock claude completed successfully"],
+        ...researchOutput,
       },
     })}\n`,
   );

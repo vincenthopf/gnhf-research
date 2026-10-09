@@ -29,6 +29,8 @@ const stubRunInfo: RunInfo = {
   stopWhen: undefined,
   commitMessagePath: "/repo/.gnhf/runs/run-abc/commit-message",
   commitMessage: undefined,
+  workflowPath: "/repo/.gnhf/runs/run-abc/workflow",
+  workflow: "default",
 };
 
 interface CliMockOverrides {
@@ -46,6 +48,7 @@ interface CliMockOverrides {
   worktreeExists?: ReturnType<typeof vi.fn>;
   getBranchDiffStats?: ReturnType<typeof vi.fn>;
   peekRunMetadata?: ReturnType<typeof vi.fn>;
+  setupRun?: ReturnType<typeof vi.fn>;
   resumeRun?: ReturnType<typeof vi.fn>;
   getLastIterationNumber?: ReturnType<typeof vi.fn>;
   getCompletedIterationCount?: ReturnType<typeof vi.fn>;
@@ -105,7 +108,7 @@ async function runCliWithMocks(
   };
   let consoleErrorCalls: unknown[][] = [];
   let stdoutWriteCalls: unknown[][] = [];
-  const setupRun = vi.fn(() => stubRunInfo);
+  const setupRun = overrides.setupRun ?? vi.fn(() => stubRunInfo);
   const peekRunMetadata = overrides.peekRunMetadata ?? vi.fn(() => stubRunInfo);
   const resumeRun = overrides.resumeRun ?? vi.fn();
   const getLastIterationNumber =
@@ -486,6 +489,7 @@ async function runCliResumeWithActualRun(
   opts: {
     liveCommitMessage?: typeof CONVENTIONAL_COMMIT_MESSAGE;
     storedCommitMessage?: "default" | "conventional";
+    storedWorkflow?: "default" | "research";
   } = {},
 ) {
   const originalArgv = [...process.argv];
@@ -509,6 +513,7 @@ async function runCliResumeWithActualRun(
   const stopWhenPath = join(runDir, "stop-when");
   const commitMessagePath = join(runDir, "commit-message");
   const schemaPath = join(runDir, "output-schema.json");
+  const workflowPath = join(runDir, "workflow");
   mkdirSync(runDir, { recursive: true });
   writeFileSync(promptPath, "existing prompt", "utf-8");
   writeFileSync(baseCommitPath, "abc123\n", "utf-8");
@@ -517,6 +522,9 @@ async function runCliResumeWithActualRun(
   }
   if (opts.storedCommitMessage !== undefined) {
     writeFileSync(commitMessagePath, `${opts.storedCommitMessage}\n`, "utf-8");
+  }
+  if (opts.storedWorkflow !== undefined) {
+    writeFileSync(workflowPath, `${opts.storedWorkflow}\n`, "utf-8");
   }
 
   const appendDebugLog = vi.fn();
@@ -599,6 +607,7 @@ async function runCliResumeWithActualRun(
     stopWhenContent?: string;
     commitMessageExists: boolean;
     commitMessageContent?: string;
+    workflowContent?: string;
   };
 
   try {
@@ -628,6 +637,9 @@ async function runCliResumeWithActualRun(
       commitMessageExists,
       commitMessageContent: commitMessageExists
         ? readFileSync(commitMessagePath, "utf-8")
+        : undefined,
+      workflowContent: existsSync(workflowPath)
+        ? readFileSync(workflowPath, "utf-8")
         : undefined,
     };
   } finally {
@@ -944,6 +956,146 @@ describe("cli", () => {
       ...expectedSchemaOptions,
       effort: "medium",
     });
+  });
+
+  it.each(["foo", "", "RESEARCH"])(
+    "rejects --workflow %j before creating the agent",
+    async (workflow) => {
+      const createAgent = vi.fn(() => ({ name: "claude" }));
+      const consoleErrorSink: unknown[][] = [];
+      const stderrWrite = vi
+        .spyOn(process.stderr, "write")
+        .mockImplementation(() => true);
+      try {
+        await expect(
+          runCliWithMocks(
+            ["--workflow", workflow, "ship it"],
+            {
+              agentPathOverride: {},
+              agentModel: {},
+              agentArgsOverride: {},
+              effort: "medium",
+              maxConsecutiveFailures: 3,
+              preventSleep: false,
+            },
+            { createAgent, consoleErrorSink },
+          ),
+        ).rejects.toThrow("process.exit unexpectedly called with 1");
+        expect(
+          stderrWrite.mock.calls.map(([chunk]) => String(chunk)).join(""),
+        ).toContain("must be one of: default or research");
+      } finally {
+        stderrWrite.mockRestore();
+      }
+      expect(createAgent).not.toHaveBeenCalled();
+    },
+  );
+
+  it("threads --workflow research into run setup, agent creation and the run log", async () => {
+    const { appendDebugLog, createAgent, setupRun } = await runCliWithMocks(
+      ["ship it", "--workflow", "research"],
+      {
+        agentPathOverride: {},
+        agentModel: {},
+        agentArgsOverride: {},
+        effort: "medium",
+        maxConsecutiveFailures: 3,
+        preventSleep: false,
+      },
+      {
+        setupRun: vi.fn(() => ({ ...stubRunInfo, workflow: "research" })),
+      },
+    );
+
+    expect(setupRun).toHaveBeenCalledWith(
+      expect.stringMatching(/^ship-it-/),
+      "ship it",
+      "abc123",
+      process.cwd(),
+      { includeStopField: false, workflow: "research" },
+    );
+    expect(createAgent).toHaveBeenCalledWith(undefined, undefined, {
+      includeStopField: false,
+      workflow: "research",
+      effort: "medium",
+    });
+    expect(appendDebugLog).toHaveBeenCalledWith(
+      "run:start",
+      expect.objectContaining({ workflow: "research" }),
+    );
+  });
+
+  it("keeps schema options unchanged for --workflow default", async () => {
+    const { createAgent, setupRun } = await runCliWithMocks(
+      ["ship it", "--workflow", "default"],
+      {
+        agentPathOverride: {},
+        agentModel: {},
+        agentArgsOverride: {},
+        effort: "medium",
+        maxConsecutiveFailures: 3,
+        preventSleep: false,
+      },
+    );
+
+    expect(setupRun).toHaveBeenCalledWith(
+      expect.stringMatching(/^ship-it-/),
+      "ship it",
+      "abc123",
+      process.cwd(),
+      { includeStopField: false },
+    );
+    expect(createAgent).toHaveBeenCalledWith(undefined, undefined, {
+      includeStopField: false,
+      effort: "medium",
+    });
+  });
+
+  it("keeps the stored research workflow when resuming a gnhf branch without --workflow", async () => {
+    const { appendDebugLog, createAgent, schema, workflowContent } =
+      await runCliResumeWithActualRun([], undefined, {
+        storedWorkflow: "research",
+      });
+
+    expect(workflowContent).toBe("research\n");
+    expect(createAgent).toHaveBeenCalledWith(undefined, undefined, {
+      includeStopField: false,
+      workflow: "research",
+      effort: "medium",
+    });
+    expect(schema.required).toEqual(
+      expect.arrayContaining(["evidence_origin", "boundary"]),
+    );
+    expect(appendDebugLog).toHaveBeenCalledWith(
+      "run:start",
+      expect.objectContaining({ workflow: "research" }),
+    );
+  });
+
+  it("overrides the stored workflow when resuming a gnhf branch with --workflow", async () => {
+    const { createAgent, schema, workflowContent } =
+      await runCliResumeWithActualRun(["--workflow", "default"], undefined, {
+        storedWorkflow: "research",
+      });
+
+    expect(workflowContent).toBe("default\n");
+    expect(createAgent).toHaveBeenCalledWith(undefined, undefined, {
+      includeStopField: false,
+      effort: "medium",
+    });
+    expect(
+      (schema.properties as Record<string, unknown>).evidence_origin,
+    ).toBeUndefined();
+
+    const upgraded = await runCliResumeWithActualRun(
+      ["--workflow", "research"],
+      undefined,
+      { storedWorkflow: "default" },
+    );
+    expect(upgraded.workflowContent).toBe("research\n");
+    expect(upgraded.schema.required).toEqual(
+      expect.arrayContaining(["evidence_origin"]),
+    );
   });
 
   it("reuses the persisted stop-when condition when resuming without --stop-when", async () => {
@@ -1274,6 +1426,66 @@ describe("cli", () => {
       expect(orchestratorCtor.mock.calls[0]?.[6]).toEqual(
         expect.objectContaining({ completedIterations: 1 }),
       );
+    } finally {
+      process.chdir(originalCwd);
+      rmSync(tempDir, { recursive: true, force: true });
+    }
+  });
+
+  it("carries the workflow through a --current-branch resume", async () => {
+    const originalCwd = process.cwd();
+    const tempDir = mkdtempSync(join(tmpdir(), "gnhf-cli-current-resume-"));
+    const runId = `ship-it-${createHash("sha256").update("ship it").digest("hex").slice(0, 6)}`;
+    const resumeRun = vi.fn(() => ({
+      ...stubRunInfo,
+      runId,
+      workflow: "research" as const,
+    }));
+
+    mkdirSync(join(tempDir, ".gnhf", "runs", runId), {
+      recursive: true,
+    });
+    process.chdir(tempDir);
+
+    try {
+      const effectiveTempDir = process.cwd();
+      const stored = await runCliWithMocks(
+        ["ship it", "--current-branch"],
+        {
+          agentPathOverride: {},
+          agentModel: {},
+          agentArgsOverride: {},
+          effort: "medium",
+          maxConsecutiveFailures: 3,
+          preventSleep: false,
+        },
+        { resumeRun },
+      );
+      expect(resumeRun).toHaveBeenLastCalledWith(runId, effectiveTempDir, {
+        includeStopField: false,
+      });
+      expect(stored.createAgent.mock.calls[0]?.[2]).toEqual({
+        includeStopField: false,
+        workflow: "research",
+        effort: "medium",
+      });
+
+      await runCliWithMocks(
+        ["ship it", "--current-branch", "--workflow", "research"],
+        {
+          agentPathOverride: {},
+          agentModel: {},
+          agentArgsOverride: {},
+          effort: "medium",
+          maxConsecutiveFailures: 3,
+          preventSleep: false,
+        },
+        { resumeRun },
+      );
+      expect(resumeRun).toHaveBeenLastCalledWith(runId, effectiveTempDir, {
+        includeStopField: false,
+        workflow: "research",
+      });
     } finally {
       process.chdir(originalCwd);
       rmSync(tempDir, { recursive: true, force: true });
@@ -2623,6 +2835,154 @@ describe("cli", () => {
     }
   });
 
+  it("carries the stored research workflow when updating the prompt on an existing gnhf branch", async () => {
+    const originalArgv = [...process.argv];
+    const stdoutWrite = vi
+      .spyOn(process.stdout, "write")
+      .mockImplementation(() => true);
+    const tempDir = mkdtempSync(join(tmpdir(), "gnhf-cli-test-"));
+    const promptPath = join(tempDir, "PROMPT.md");
+    const orchestratorCtor = vi.fn();
+    const setupRun = vi.fn(() => stubRunInfo);
+    const peekRunMetadata = vi.fn(() => ({
+      ...stubRunInfo,
+      runId: "existing-run",
+      promptPath,
+    }));
+    const commitAll = vi.fn();
+    const ensureCleanWorkingTree = vi.fn();
+    const resumeRun = vi.fn(() => ({
+      ...stubRunInfo,
+      runId: "existing-run",
+      promptPath,
+      workflow: "research" as const,
+    }));
+    const createAgent = vi.fn<(...args: unknown[]) => { name: string }>(() => ({
+      name: "claude",
+    }));
+
+    writeFileSync(promptPath, "existing prompt", "utf-8");
+
+    vi.resetModules();
+    vi.doMock("node:readline", () => ({
+      createInterface: vi.fn(() => ({
+        question: (_question: string, callback: (answer: string) => void) => {
+          callback("o");
+        },
+        close: vi.fn(),
+        once: vi.fn(),
+        off: vi.fn(),
+      })),
+    }));
+    vi.doMock("./core/config.js", () => ({
+      loadConfig: vi.fn(() => ({
+        agentPathOverride: {},
+        agentModel: {},
+        agentArgsOverride: {},
+        effort: "medium",
+        maxConsecutiveFailures: 3,
+        preventSleep: false,
+      })),
+    }));
+    vi.doMock("./core/debug-log.js", () => ({
+      appendDebugLog: vi.fn(),
+      initDebugLog: vi.fn(),
+      serializeError: vi.fn(),
+    }));
+    vi.doMock("./core/git.js", () => ({
+      commitAll,
+      ensureCleanWorkingTree,
+      createBranch: vi.fn(),
+      getHeadCommit: vi.fn(() => "abc123"),
+      getCurrentBranch: vi.fn(() => "gnhf/existing-run"),
+      getRepoRootDir: vi.fn(() => "/repo"),
+      createWorktree: vi.fn(),
+      removeWorktree: vi.fn(),
+    }));
+    vi.doMock("./core/run.js", () => ({
+      setupRun,
+      peekRunMetadata,
+      resumeRun,
+      getLastIterationNumber: vi.fn(() => 3),
+      getCompletedIterationCount: vi.fn(() => 0),
+      getInterruptedIteration: vi.fn(() => null),
+      appendNotes: vi.fn(),
+      writeRunEndState: vi.fn(),
+    }));
+    vi.doMock("./core/agents/factory.js", () => ({ createAgent }));
+    vi.doMock("./core/sleep.js", () => ({
+      startSleepPrevention: vi.fn(),
+    }));
+    vi.doMock("./core/orchestrator.js", () => ({
+      Orchestrator: class MockOrchestrator {
+        constructor(...args: unknown[]) {
+          orchestratorCtor(...args);
+        }
+        start = vi.fn(() => Promise.resolve());
+        stop = vi.fn();
+        on = vi.fn();
+        getState = vi.fn(() => ({
+          status: "completed" as const,
+          currentIteration: 3,
+          totalInputTokens: 0,
+          totalOutputTokens: 0,
+          commitCount: 0,
+          iterations: [],
+          successCount: 0,
+          failCount: 0,
+          consecutiveFailures: 0,
+          startTime: new Date("2026-01-01T00:00:00Z"),
+          waitingUntil: null,
+          lastMessage: null,
+        }));
+      },
+    }));
+    vi.doMock("./renderer.js", () => ({
+      Renderer: class MockRenderer {
+        start = vi.fn();
+        stop = vi.fn();
+        waitUntilExit = vi.fn(() => Promise.resolve());
+      },
+    }));
+
+    process.argv = ["node", "gnhf", "new prompt"];
+    const originalIsTTY = Object.getOwnPropertyDescriptor(
+      process.stdin,
+      "isTTY",
+    );
+    Object.defineProperty(process.stdin, "isTTY", {
+      configurable: true,
+      value: true,
+    });
+
+    try {
+      await import("./cli.js");
+
+      expect(resumeRun).toHaveBeenCalledWith("existing-run", process.cwd(), {
+        includeStopField: false,
+      });
+      expect(setupRun).toHaveBeenCalledWith(
+        "existing-run",
+        "new prompt",
+        "abc123",
+        process.cwd(),
+        { includeStopField: false, workflow: "research" },
+      );
+      expect(createAgent.mock.calls[0]?.[2]).toEqual({
+        includeStopField: false,
+        workflow: "research",
+        effort: "medium",
+      });
+    } finally {
+      process.argv = originalArgv;
+      if (originalIsTTY) {
+        Object.defineProperty(process.stdin, "isTTY", originalIsTTY);
+      }
+      stdoutWrite.mockRestore();
+      rmSync(tempDir, { recursive: true, force: true });
+    }
+  });
+
   it("waits for orchestrator shutdown after the renderer exits", async () => {
     let resolveStart!: () => void;
     const orchestratorStart = vi.fn(
@@ -3617,6 +3977,123 @@ describe("cli", () => {
         completedIterations: 0,
         stopWhen: undefined,
       });
+    } finally {
+      rmSync(tempDir, { recursive: true, force: true });
+    }
+  });
+
+  it("carries the workflow through a preserved worktree resume", async () => {
+    const tempDir = mkdtempSync(join(tmpdir(), "gnhf-cli-worktree-resume-"));
+    const repoRoot = join(tempDir, "repo");
+    const hash = createHash("sha256")
+      .update("ship it")
+      .digest("hex")
+      .slice(0, 6);
+    const runId = `ship-it-${hash}`;
+    const branch = `gnhf/${runId}`;
+    const worktreePath = join(tempDir, "repo-gnhf-worktrees", runId);
+    mkdirSync(join(worktreePath, ".gnhf", "runs", runId), {
+      recursive: true,
+    });
+
+    const resumeRun = vi.fn(() => ({
+      ...stubRunInfo,
+      runId,
+      runDir: join(worktreePath, ".gnhf", "runs", runId),
+      workflow: "research" as const,
+    }));
+
+    try {
+      const { createAgent, orchestratorCtor } = await runCliWithMocks(
+        ["ship it", "--worktree", "--workflow", "research"],
+        {
+          agentPathOverride: {},
+          agentModel: {},
+          agentArgsOverride: {},
+          effort: "medium",
+          maxConsecutiveFailures: 3,
+          preventSleep: false,
+        },
+        {
+          getRepoRootDir: vi.fn(() => repoRoot),
+          getCurrentBranch: vi.fn((cwd: string) =>
+            cwd === worktreePath ? branch : "main",
+          ),
+          listWorktreePaths: vi.fn(() => new Set([worktreePath])),
+          resumeRun,
+        },
+      );
+
+      expect(resumeRun).toHaveBeenCalledWith(runId, worktreePath, {
+        includeStopField: false,
+        workflow: "research",
+      });
+      expect(createAgent.mock.calls[0]?.[2]).toEqual({
+        includeStopField: false,
+        workflow: "research",
+        effort: "medium",
+      });
+      expect(orchestratorCtor.mock.calls[0]?.[2]).toEqual(
+        expect.objectContaining({ workflow: "research" }),
+      );
+    } finally {
+      rmSync(tempDir, { recursive: true, force: true });
+    }
+  });
+
+  it("keeps the stored research workflow when resuming a preserved worktree without --workflow", async () => {
+    const tempDir = mkdtempSync(join(tmpdir(), "gnhf-cli-worktree-resume-"));
+    const repoRoot = join(tempDir, "repo");
+    const hash = createHash("sha256")
+      .update("ship it")
+      .digest("hex")
+      .slice(0, 6);
+    const runId = `ship-it-${hash}`;
+    const branch = `gnhf/${runId}`;
+    const worktreePath = join(tempDir, "repo-gnhf-worktrees", runId);
+    mkdirSync(join(worktreePath, ".gnhf", "runs", runId), {
+      recursive: true,
+    });
+
+    const resumeRun = vi.fn(() => ({
+      ...stubRunInfo,
+      runId,
+      runDir: join(worktreePath, ".gnhf", "runs", runId),
+      workflow: "research" as const,
+    }));
+
+    try {
+      const { createAgent, orchestratorCtor } = await runCliWithMocks(
+        ["ship it", "--worktree"],
+        {
+          agentPathOverride: {},
+          agentModel: {},
+          agentArgsOverride: {},
+          effort: "medium",
+          maxConsecutiveFailures: 3,
+          preventSleep: false,
+        },
+        {
+          getRepoRootDir: vi.fn(() => repoRoot),
+          getCurrentBranch: vi.fn((cwd: string) =>
+            cwd === worktreePath ? branch : "main",
+          ),
+          listWorktreePaths: vi.fn(() => new Set([worktreePath])),
+          resumeRun,
+        },
+      );
+
+      expect(resumeRun).toHaveBeenCalledWith(runId, worktreePath, {
+        includeStopField: false,
+      });
+      expect(createAgent.mock.calls[0]?.[2]).toEqual({
+        includeStopField: false,
+        workflow: "research",
+        effort: "medium",
+      });
+      expect(orchestratorCtor.mock.calls[0]?.[2]).toEqual(
+        expect.objectContaining({ workflow: "research" }),
+      );
     } finally {
       rmSync(tempDir, { recursive: true, force: true });
     }

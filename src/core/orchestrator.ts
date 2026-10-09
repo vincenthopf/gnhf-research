@@ -31,6 +31,7 @@ import { buildCommitMessage } from "./commit-message.js";
 import { formatDeadline } from "./deadline.js";
 import { buildIterationPrompt } from "../templates/iteration-prompt.js";
 import { getTotalTokenCount } from "../utils/tokens.js";
+import type { ResearchEvidence } from "./workflow.js";
 
 export interface IterationRecord {
   number: number;
@@ -39,6 +40,7 @@ export interface IterationRecord {
   keyChanges: string[];
   keyLearnings: string[];
   timestamp: Date;
+  evidence?: ResearchEvidence;
 }
 
 export type { InterruptDisposition, InterruptHint } from "./interrupt-state.js";
@@ -344,6 +346,7 @@ export class Orchestrator extends EventEmitter<OrchestratorEvents> {
           prompt: this.prompt,
           stopWhen: this.limits.stopWhen,
           commitMessage: this.config.commitMessage,
+          workflow: this.runInfo.workflow,
           ...(this.limits.until === undefined
             ? {}
             : { deadline: formatDeadline(this.limits.until) }),
@@ -449,6 +452,7 @@ export class Orchestrator extends EventEmitter<OrchestratorEvents> {
           summary: record.summary,
           keyChanges: record.keyChanges.length,
           keyLearnings: record.keyLearnings.length,
+          ...record.evidence,
           consecutiveFailures: this.state.consecutiveFailures,
           totalInputTokens: this.state.totalInputTokens,
           totalOutputTokens: this.state.totalOutputTokens,
@@ -737,6 +741,7 @@ export class Orchestrator extends EventEmitter<OrchestratorEvents> {
           result.output.summary,
           toStringArray(result.output.key_learnings),
           "reported",
+          this.researchEvidence(result.output),
         ),
         shouldFullyStop,
       };
@@ -813,9 +818,23 @@ export class Orchestrator extends EventEmitter<OrchestratorEvents> {
     }
   }
 
+  private researchEvidence(output: AgentOutput): ResearchEvidence | undefined {
+    if (this.runInfo.workflow !== "research") return undefined;
+    return {
+      evidenceOrigin:
+        typeof output.evidence_origin === "string"
+          ? output.evidence_origin
+          : "none",
+      goalsChanged: toStringArray(output.goals_changed),
+      contractsRun: toStringArray(output.contracts_run),
+      boundary: typeof output.boundary === "string" ? output.boundary : "",
+    };
+  }
+
   private recordSuccess(output: AgentOutput): IterationRecord {
     const keyChanges = toStringArray(output.key_changes_made);
     const keyLearnings = toStringArray(output.key_learnings);
+    const evidence = this.researchEvidence(output);
     try {
       const committed = commitAll(
         buildCommitMessage(this.config.commitMessage, output, {
@@ -838,6 +857,7 @@ export class Orchestrator extends EventEmitter<OrchestratorEvents> {
       output.summary,
       keyChanges,
       keyLearnings,
+      ...(evidence === undefined ? [] : [evidence]),
     );
     this.state.commitCount = getBranchCommitCount(
       this.runInfo.baseCommit,
@@ -854,6 +874,7 @@ export class Orchestrator extends EventEmitter<OrchestratorEvents> {
       keyChanges,
       keyLearnings,
       timestamp: new Date(),
+      ...(evidence === undefined ? {} : { evidence }),
     };
   }
 
@@ -920,6 +941,7 @@ ${this.pendingCommitFailure}
     recordSummary: string,
     learnings: string[],
     kind: "reported" | "error",
+    evidence?: ResearchEvidence,
   ): IterationRecord {
     const hadPendingCommitFailure = this.pendingCommitFailure !== null;
     appendNotes(
@@ -928,6 +950,7 @@ ${this.pendingCommitFailure}
       notesSummary,
       [],
       toStringArray(learnings),
+      ...(evidence === undefined ? [] : [evidence]),
     );
     if (!hadPendingCommitFailure) {
       resetHard(this.cwd);
@@ -953,6 +976,7 @@ ${this.pendingCommitFailure}
       keyChanges: [],
       keyLearnings: toStringArray(learnings),
       timestamp: new Date(),
+      ...(evidence === undefined ? {} : { evidence }),
     };
   }
 

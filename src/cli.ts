@@ -68,6 +68,7 @@ import {
 import { MockOrchestrator } from "./mock-orchestrator.js";
 import { Renderer } from "./renderer.js";
 import { slugifyPrompt } from "./utils/slugify.js";
+import { parseWorkflow, type Workflow } from "./core/workflow.js";
 import { getTotalTokenCount } from "./utils/tokens.js";
 
 const packageVersion = JSON.parse(
@@ -123,6 +124,14 @@ function parseDuration(value: string): number {
     throw new InvalidArgumentError("must be a safe duration");
   }
   return duration;
+}
+
+function parseWorkflowOption(value: string): Workflow {
+  try {
+    return parseWorkflow(value);
+  } catch (err) {
+    throw new InvalidArgumentError((err as Error).message);
+  }
 }
 
 function parseUntilOption(value: string): Date {
@@ -208,6 +217,7 @@ function emptyBranchDiffStats(commitCount: number): BranchDiffStats {
 function buildSchemaOptions(
   stopWhen: string | undefined,
   commitMessage: CommitMessageConfig | undefined,
+  workflow: Workflow | undefined,
 ): RunSchemaOptions {
   const commitFields = getCommitMessageSchemaFields(commitMessage);
   return {
@@ -215,23 +225,30 @@ function buildSchemaOptions(
     ...(stopWhen === undefined ? {} : { stopWhen }),
     ...(commitMessage === undefined ? {} : { commitMessage }),
     ...(commitFields.length === 0 ? {} : { commitFields }),
+    ...(workflow === "research" ? { workflow } : {}),
   };
 }
 
 function buildResumeSchemaOptions(
   stopWhen: string | undefined,
   commitMessage: CommitMessageConfig | undefined,
+  workflow: Workflow | undefined,
 ): RunSchemaOptions {
   const commitFields = getCommitMessageSchemaFields(commitMessage);
+  const workflowOverride = workflow === undefined ? {} : { workflow };
   if (stopWhen === "") {
     return {
       includeStopField: false,
       clearStopWhen: true,
       ...(commitMessage === undefined ? {} : { commitMessage }),
       ...(commitFields.length === 0 ? {} : { commitFields }),
+      ...workflowOverride,
     };
   }
-  return buildSchemaOptions(stopWhen, commitMessage);
+  return {
+    ...buildSchemaOptions(stopWhen, commitMessage, undefined),
+    ...workflowOverride,
+  };
 }
 
 function recoverInterruptedIteration(runDir: string, cwd: string): void {
@@ -670,6 +687,11 @@ program
     'End when the agent reports this condition, after any commit-failure repair; resumes reuse it, pass a new value to overwrite or "" to clear',
   )
   .option(
+    "--workflow <name>",
+    'Iteration workflow ("default" or "research"); resumes reuse the stored workflow, pass a value to overwrite it',
+    parseWorkflowOption,
+  )
+  .option(
     "--prevent-sleep <mode>",
     'Prevent system sleep during the run ("on" or "off")',
     parseOnOffBoolean,
@@ -708,6 +730,7 @@ program
         until?: Date;
         fallbackModel?: string;
         stopWhen?: string;
+        workflow?: Workflow;
         preventSleep?: boolean;
         worktree: boolean;
         currentBranch: boolean;
@@ -808,6 +831,7 @@ program
       let schemaOptions = buildSchemaOptions(
         effectiveStopWhen,
         effectiveCommitMessage,
+        options.workflow,
       );
 
       let runInfo;
@@ -830,7 +854,11 @@ program
           prompt,
           cwd,
           schemaOptions,
-          buildResumeSchemaOptions(options.stopWhen, effectiveCommitMessage),
+          buildResumeSchemaOptions(
+            options.stopWhen,
+            effectiveCommitMessage,
+            options.workflow,
+          ),
         );
         runInfo = wt.runInfo;
         effectiveCwd = wt.effectiveCwd;
@@ -847,6 +875,7 @@ program
           schemaOptions = buildSchemaOptions(
             effectiveStopWhen,
             effectiveCommitMessage,
+            runInfo.workflow,
           );
           startIteration = getLastIterationNumber(runInfo);
           console.error(
@@ -885,7 +914,11 @@ program
         const existing = resumeCurrentBranchRun(
           prompt,
           cwd,
-          buildResumeSchemaOptions(options.stopWhen, effectiveCommitMessage),
+          buildResumeSchemaOptions(
+            options.stopWhen,
+            effectiveCommitMessage,
+            options.workflow,
+          ),
         );
 
         if (existing) {
@@ -895,6 +928,7 @@ program
           schemaOptions = buildSchemaOptions(
             effectiveStopWhen,
             effectiveCommitMessage,
+            existing.workflow,
           );
           startIteration = getLastIterationNumber(existing);
         } else {
@@ -917,12 +951,14 @@ program
             buildResumeSchemaOptions(
               options.stopWhen,
               existingMetadata.commitMessage,
+              options.workflow,
             ),
           );
           const resumeStopWhen = existing.stopWhen;
           const resumeSchemaOptions = buildSchemaOptions(
             resumeStopWhen,
             existing.commitMessage,
+            existing.workflow,
           );
           prompt = existingPrompt;
           runInfo = existing;
@@ -950,12 +986,14 @@ program
               buildResumeSchemaOptions(
                 options.stopWhen,
                 existingMetadata.commitMessage,
+                options.workflow,
               ),
             );
             const resumeStopWhen = existing.stopWhen;
             const resumeSchemaOptions = buildSchemaOptions(
               resumeStopWhen,
               existing.commitMessage,
+              existing.workflow,
             );
             runInfo = setupRun(
               existingRunId,
@@ -974,6 +1012,7 @@ program
             schemaOptions = buildSchemaOptions(
               effectiveStopWhen,
               effectiveCommitMessage,
+              options.workflow,
             );
             runInfo = initializeNewBranch(prompt, cwd, schemaOptions);
           } else {
@@ -1076,6 +1115,7 @@ program
         effort: config.effort,
         stopWhen: effectiveStopWhen,
         commitMessage: effectiveCommitMessage,
+        workflow: runInfo.workflow,
         preventSleep: config.preventSleep,
         agentArgsOverride: config.agentArgsOverride.claude,
         worktree: options.worktree,

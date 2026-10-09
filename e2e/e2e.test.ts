@@ -305,6 +305,103 @@ describe("gnhf e2e", () => {
     expect(git(["rev-list", "--count", "HEAD"], cwd)).toBe("3");
   }, 30_000);
 
+  it("runs the research workflow with research fields in the schema and prompt", async () => {
+    const cwd = createRepo();
+    tempDirs.push(cwd);
+    const logDir = mkdtempSync(join(tmpdir(), "gnhf-e2e-logs-"));
+    tempDirs.push(logDir);
+    const mockLogPath = join(logDir, "mock-claude.jsonl");
+    const env = createTestEnv(mockLogPath, tempDirs);
+
+    const result = await runCli(
+      cwd,
+      ["study it", "--workflow", "research", "--max-iterations", "1"],
+      { env },
+    );
+
+    expect(result.code).toBe(0);
+    const spawnEvent = await waitForLogEvent(mockLogPath, "spawn");
+    const args = spawnEvent.args as string[];
+    const schema = JSON.parse(args[args.indexOf("--json-schema") + 1]!) as {
+      required: string[];
+    };
+    expect(schema.required).toEqual(
+      expect.arrayContaining([
+        "evidence_origin",
+        "goals_changed",
+        "contracts_run",
+        "boundary",
+      ]),
+    );
+    expect(String(spawnEvent.prompt)).toContain("## Research Workflow");
+
+    const runDir = dirname(findRunLogPath(cwd));
+    expect(readFileSync(join(runDir, "workflow"), "utf-8")).toBe("research\n");
+    expect(readFileSync(join(runDir, "notes.md"), "utf-8")).toContain(
+      "**Evidence:** executed. Goals changed: G1. Contracts run: none. Boundary: mock boundary",
+    );
+    const endEvent = readJsonLines(join(runDir, "gnhf.log")).find(
+      (entry) => entry.event === "iteration:end",
+    );
+    expect(endEvent).toMatchObject({
+      evidenceOrigin: "executed",
+      goalsChanged: ["G1"],
+      contractsRun: [],
+      boundary: "mock boundary",
+    });
+
+    const resumed = await runCli(cwd, ["--max-iterations", "2"], { env });
+    expect(resumed.code).toBe(0);
+    const prompts = readJsonLines(mockLogPath)
+      .filter((entry) => entry.event === "spawn")
+      .map((entry) => String(entry.prompt));
+    expect(prompts).toHaveLength(2);
+    expect(prompts[1]).toContain("## Research Workflow");
+  }, 30_000);
+
+  it("leaves research fields out of the default workflow", async () => {
+    const cwd = createRepo();
+    tempDirs.push(cwd);
+    const logDir = mkdtempSync(join(tmpdir(), "gnhf-e2e-logs-"));
+    tempDirs.push(logDir);
+    const mockLogPath = join(logDir, "mock-claude.jsonl");
+
+    const result = await runCli(cwd, ["ship it", "--max-iterations", "1"], {
+      env: createTestEnv(mockLogPath, tempDirs),
+    });
+
+    expect(result.code).toBe(0);
+    const spawnEvent = await waitForLogEvent(mockLogPath, "spawn");
+    const args = spawnEvent.args as string[];
+    expect(args[args.indexOf("--json-schema") + 1]).not.toContain(
+      "evidence_origin",
+    );
+    expect(String(spawnEvent.prompt)).not.toContain("## Research Workflow");
+    const runDir = dirname(findRunLogPath(cwd));
+    expect(readFileSync(join(runDir, "workflow"), "utf-8")).toBe("default\n");
+    expect(readFileSync(join(runDir, "notes.md"), "utf-8")).not.toContain(
+      "**Evidence:**",
+    );
+  }, 30_000);
+
+  it("rejects an unknown --workflow before spawning claude", async () => {
+    const cwd = createRepo();
+    tempDirs.push(cwd);
+    const logDir = mkdtempSync(join(tmpdir(), "gnhf-e2e-logs-"));
+    tempDirs.push(logDir);
+    const mockLogPath = join(logDir, "mock-claude.jsonl");
+
+    const result = await runCli(cwd, ["ship it", "--workflow", "bogus"], {
+      env: createTestEnv(mockLogPath, tempDirs),
+    });
+
+    expect(result.code).toBe(1);
+    expect(result.stderr).toContain("--workflow");
+    expect(result.stderr).toContain("must be one of: default or research");
+    expect(existsSync(mockLogPath)).toBe(false);
+    expect(existsSync(join(cwd, ".gnhf", "runs"))).toBe(false);
+  }, 30_000);
+
   it("wraps up and stops after three iterations that change nothing", async () => {
     const cwd = createRepo();
     tempDirs.push(cwd);

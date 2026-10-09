@@ -19,6 +19,12 @@ import {
   type CommitMessageConfig,
 } from "./commit-message.js";
 import { findLegacyRunBaseCommit, getHeadCommit } from "./git.js";
+import {
+  formatResearchEvidence,
+  isWorkflow,
+  type ResearchEvidence,
+  type Workflow,
+} from "./workflow.js";
 
 export interface RunInfo {
   runId: string;
@@ -33,6 +39,8 @@ export interface RunInfo {
   stopWhen: string | undefined;
   commitMessagePath: string;
   commitMessage: CommitMessageConfig | undefined;
+  workflowPath: string;
+  workflow: Workflow;
 }
 
 export interface RunMetadata {
@@ -48,6 +56,7 @@ const LOG_FILENAME = "gnhf.log";
 const END_STATE_FILENAME = "end-state.json";
 const STOP_WHEN_FILENAME = "stop-when";
 const COMMIT_MESSAGE_FILENAME = "commit-message";
+const WORKFLOW_FILENAME = "workflow";
 
 function writeSchemaFile(
   schemaPath: string,
@@ -59,6 +68,7 @@ function writeSchemaFile(
       buildAgentOutputSchema({
         includeStopField: schemaOptions.includeStopField,
         commitFields: schemaOptions.commitFields,
+        research: schemaOptions.workflow === "research",
       }),
       null,
       2,
@@ -73,6 +83,7 @@ export interface RunSchemaOptions {
   commitMessage?: CommitMessageConfig;
   stopWhen?: string;
   clearStopWhen?: boolean;
+  workflow?: Workflow;
 }
 
 export interface RunEndState {
@@ -96,6 +107,21 @@ function readStopWhen(stopWhenPath: string): string | undefined {
   if (!existsSync(stopWhenPath)) return undefined;
   const stopWhen = readFileSync(stopWhenPath, "utf-8").trim();
   return stopWhen.length > 0 ? stopWhen : undefined;
+}
+
+function readWorkflow(workflowPath: string): Workflow {
+  if (!existsSync(workflowPath)) return "default";
+  const value = readFileSync(workflowPath, "utf-8").trim();
+  if (!isWorkflow(value)) {
+    throw new Error(
+      `Unknown workflow "${value}" in ${workflowPath}; pass --workflow default or --workflow research to replace it`,
+    );
+  }
+  return value;
+}
+
+function writeWorkflow(workflowPath: string, workflow: Workflow): void {
+  writeFileSync(workflowPath, `${workflow}\n`, "utf-8");
 }
 
 function commitMessageMetadataValue(
@@ -242,6 +268,9 @@ export function setupRun(
   const commitMessagePath = join(runDir, COMMIT_MESSAGE_FILENAME);
   const commitMessage = schemaOptions.commitMessage;
   writeCommitMessageMetadata(commitMessagePath, commitMessage);
+  const workflowPath = join(runDir, WORKFLOW_FILENAME);
+  const workflow = schemaOptions.workflow ?? "default";
+  writeWorkflow(workflowPath, workflow);
 
   return {
     runId,
@@ -256,6 +285,8 @@ export function setupRun(
     stopWhen,
     commitMessagePath,
     commitMessage,
+    workflowPath,
+    workflow,
   };
 }
 
@@ -288,8 +319,17 @@ export function resumeRun(
   }
   const commitMessagePath = join(runDir, COMMIT_MESSAGE_FILENAME);
   const commitMessage = resolveRunCommitMessage(commitMessagePath, schemaPath);
+  const workflowPath = join(runDir, WORKFLOW_FILENAME);
+  let workflow: Workflow;
+  if (schemaOptions.workflow === undefined) {
+    workflow = readWorkflow(workflowPath);
+  } else {
+    workflow = schemaOptions.workflow;
+    writeWorkflow(workflowPath, workflow);
+  }
   writeSchemaFile(schemaPath, {
     ...schemaOptions,
+    workflow,
     commitMessage,
     commitFields: getCommitMessageSchemaFields(commitMessage),
     includeStopField: schemaOptions.includeStopField || stopWhen !== undefined,
@@ -308,6 +348,8 @@ export function resumeRun(
     stopWhen,
     commitMessagePath,
     commitMessage,
+    workflowPath,
+    workflow,
   };
 }
 
@@ -449,10 +491,14 @@ export function appendNotes(
   summary: string,
   changes: string[],
   learnings: string[],
+  evidence?: ResearchEvidence,
 ): void {
   const entry = [
     `\n### Iteration ${iteration}\n`,
     `**Summary:** ${summary}\n`,
+    ...(evidence === undefined
+      ? []
+      : [`${formatResearchEvidence(evidence)}\n`]),
     formatListSection("Changes", changes),
     formatListSection("Learnings", learnings),
   ].join("\n");

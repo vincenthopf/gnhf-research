@@ -4,7 +4,20 @@ export interface AgentOutput {
   key_changes_made: unknown;
   key_learnings: unknown;
   should_fully_stop?: boolean;
+  evidence_origin?: EvidenceOrigin;
+  goals_changed?: unknown;
+  contracts_run?: unknown;
+  boundary?: string;
 }
+
+export const EVIDENCE_ORIGINS = [
+  "executed",
+  "source_read",
+  "reasoning_only",
+  "none",
+] as const;
+
+export type EvidenceOrigin = (typeof EVIDENCE_ORIGINS)[number];
 
 export interface AgentOutputSchema {
   type: "object";
@@ -24,6 +37,7 @@ export interface AgentOutputCommitField {
 export function buildAgentOutputSchema(opts: {
   includeStopField: boolean;
   commitFields?: AgentOutputCommitField[];
+  research?: boolean;
 }): AgentOutputSchema {
   const properties: AgentOutputSchema["properties"] = {
     success: { type: "boolean" },
@@ -38,6 +52,21 @@ export function buildAgentOutputSchema(opts: {
       ...(field.allowed === undefined ? {} : { enum: field.allowed }),
     };
     required.push(field.name);
+  }
+  if (opts.research) {
+    properties.evidence_origin = {
+      type: "string",
+      enum: [...EVIDENCE_ORIGINS],
+    };
+    properties.goals_changed = { type: "array", items: { type: "string" } };
+    properties.contracts_run = { type: "array", items: { type: "string" } };
+    properties.boundary = { type: "string" };
+    required.push(
+      "evidence_origin",
+      "goals_changed",
+      "contracts_run",
+      "boundary",
+    );
   }
   if (opts.includeStopField) {
     properties.should_fully_stop = { type: "boolean" };

@@ -286,7 +286,58 @@ describe("setupRun", () => {
       stopWhen: undefined,
       commitMessagePath: join(runDir, "commit-message"),
       commitMessage: undefined,
+      workflowPath: join(runDir, "workflow"),
+      workflow: "default",
     });
+  });
+
+  it("writes the default workflow file when workflow is omitted", () => {
+    setupRun("run-abc", "test", "abc123", P, { includeStopField: false });
+
+    expect(mockWriteFileSync).toHaveBeenCalledWith(
+      join(P, ".gnhf", "runs", "run-abc", "workflow"),
+      "default\n",
+      "utf-8",
+    );
+  });
+
+  it("writes the research workflow file and research schema fields", () => {
+    const info = setupRun("run-abc", "test", "abc123", P, {
+      includeStopField: false,
+      workflow: "research",
+    });
+
+    expect(info.workflow).toBe("research");
+    expect(mockWriteFileSync).toHaveBeenCalledWith(
+      join(P, ".gnhf", "runs", "run-abc", "workflow"),
+      "research\n",
+      "utf-8",
+    );
+    const schemaCall = mockWriteFileSync.mock.calls.find(
+      (call) =>
+        typeof call[0] === "string" && call[0].endsWith("output-schema.json"),
+    );
+    const schema = JSON.parse(schemaCall![1] as string);
+    expect(schema.required).toEqual(
+      expect.arrayContaining([
+        "evidence_origin",
+        "goals_changed",
+        "contracts_run",
+        "boundary",
+      ]),
+    );
+  });
+
+  it("leaves research fields out of the schema in the default workflow", () => {
+    setupRun("run-abc", "test", "abc123", P, { includeStopField: false });
+
+    const schemaCall = mockWriteFileSync.mock.calls.find(
+      (call) =>
+        typeof call[0] === "string" && call[0].endsWith("output-schema.json"),
+    );
+    const schema = JSON.parse(schemaCall![1] as string);
+    expect(schema.properties.evidence_origin).toBeUndefined();
+    expect(schema.required).not.toContain("evidence_origin");
   });
 });
 
@@ -393,6 +444,105 @@ describe("resumeRun", () => {
 
     expect(info.stopWhen).toBe("all tests pass");
     expect(info.stopWhenPath).toBe(stopWhenPath);
+  });
+
+  it("keeps the stored research workflow when no workflow is passed", () => {
+    const runDir = join(P, ".gnhf", "runs", "run-abc");
+    const workflowPath = join(runDir, "workflow");
+    mockExistsSync.mockImplementation(
+      (path) => path === runDir || path === workflowPath,
+    );
+    mockReadFileSync.mockImplementation((path) =>
+      path === workflowPath ? "research\n" : "",
+    );
+
+    const info = resumeRun("run-abc", P, { includeStopField: false });
+
+    expect(info.workflow).toBe("research");
+    expect(info.workflowPath).toBe(workflowPath);
+    expect(mockWriteFileSync).not.toHaveBeenCalledWith(
+      workflowPath,
+      expect.any(String),
+      "utf-8",
+    );
+    const schemaCall = mockWriteFileSync.mock.calls.find(
+      (call) =>
+        typeof call[0] === "string" && call[0].endsWith("output-schema.json"),
+    );
+    const schema = JSON.parse(schemaCall![1] as string);
+    expect(schema.required).toContain("evidence_origin");
+  });
+
+  it("treats a run without a workflow file as the default workflow", () => {
+    const runDir = join(P, ".gnhf", "runs", "run-abc");
+    mockExistsSync.mockImplementation((path) => path === runDir);
+
+    const info = resumeRun("run-abc", P, { includeStopField: false });
+
+    expect(info.workflow).toBe("default");
+    const schemaCall = mockWriteFileSync.mock.calls.find(
+      (call) =>
+        typeof call[0] === "string" && call[0].endsWith("output-schema.json"),
+    );
+    const schema = JSON.parse(schemaCall![1] as string);
+    expect(schema.properties.evidence_origin).toBeUndefined();
+  });
+
+  it("overrides the stored workflow and rewrites the schema when one is passed", () => {
+    const runDir = join(P, ".gnhf", "runs", "run-abc");
+    const workflowPath = join(runDir, "workflow");
+    mockExistsSync.mockImplementation(
+      (path) => path === runDir || path === workflowPath,
+    );
+    mockReadFileSync.mockImplementation((path) =>
+      path === workflowPath ? "research\n" : "",
+    );
+
+    const info = resumeRun("run-abc", P, {
+      includeStopField: false,
+      workflow: "default",
+    });
+
+    expect(info.workflow).toBe("default");
+    expect(mockWriteFileSync).toHaveBeenCalledWith(
+      workflowPath,
+      "default\n",
+      "utf-8",
+    );
+    const schemaCall = mockWriteFileSync.mock.calls.find(
+      (call) =>
+        typeof call[0] === "string" && call[0].endsWith("output-schema.json"),
+    );
+    const schema = JSON.parse(schemaCall![1] as string);
+    expect(schema.properties.evidence_origin).toBeUndefined();
+  });
+
+  it("rejects an unknown stored workflow", () => {
+    const runDir = join(P, ".gnhf", "runs", "run-abc");
+    const workflowPath = join(runDir, "workflow");
+    mockExistsSync.mockImplementation(
+      (path) => path === runDir || path === workflowPath,
+    );
+    mockReadFileSync.mockImplementation((path) =>
+      path === workflowPath ? "bogus\n" : "",
+    );
+
+    expect(() => resumeRun("run-abc", P, { includeStopField: false })).toThrow(
+      `Unknown workflow "bogus" in ${workflowPath}; pass --workflow default or --workflow research to replace it`,
+    );
+  });
+
+  it("rejects an empty stored workflow with a hint to replace it", () => {
+    const runDir = join(P, ".gnhf", "runs", "run-abc");
+    const workflowPath = join(runDir, "workflow");
+    mockExistsSync.mockImplementation(
+      (path) => path === runDir || path === workflowPath,
+    );
+    mockReadFileSync.mockImplementation(() => "\n");
+
+    expect(() => resumeRun("run-abc", P, { includeStopField: false })).toThrow(
+      `Unknown workflow "" in ${workflowPath}; pass --workflow default or --workflow research to replace it`,
+    );
   });
 
   it("returns undefined for stop-when when the file is missing", () => {
@@ -607,6 +757,40 @@ describe("appendNotes", () => {
     appendNotes("/notes.md", 1, "summary", ["change"], []);
     const content = mockAppendFileSync.mock.calls[0][1] as string;
     expect(content).not.toContain("**Learnings:**");
+  });
+
+  it("writes no evidence line without research evidence", () => {
+    appendNotes("/notes.md", 1, "summary", ["change"], ["learning"]);
+    const content = mockAppendFileSync.mock.calls[0][1] as string;
+    expect(content).toBe(
+      "\n### Iteration 1\n\n**Summary:** summary\n\n**Changes:**\n- change\n\n**Learnings:**\n- learning\n",
+    );
+  });
+
+  it("adds one evidence line after the summary for research evidence", () => {
+    appendNotes("/notes.md", 4, "summary", ["change"], [], {
+      evidenceOrigin: "executed",
+      goalsChanged: ["G1", "G2"],
+      contractsRun: ["N5-1"],
+      boundary: "does not show behavior at scale",
+    });
+    const content = mockAppendFileSync.mock.calls[0][1] as string;
+    expect(content).toBe(
+      "\n### Iteration 4\n\n**Summary:** summary\n\n**Evidence:** executed. Goals changed: G1, G2. Contracts run: N5-1. Boundary: does not show behavior at scale\n\n**Changes:**\n- change\n\n",
+    );
+  });
+
+  it("writes none for empty research lists and boundary", () => {
+    appendNotes("/notes.md", 2, "summary", [], [], {
+      evidenceOrigin: "reasoning_only",
+      goalsChanged: [],
+      contractsRun: [],
+      boundary: "",
+    });
+    const content = mockAppendFileSync.mock.calls[0][1] as string;
+    expect(content).toContain(
+      "**Evidence:** reasoning_only. Goals changed: none. Contracts run: none. Boundary: none\n",
+    );
   });
 });
 

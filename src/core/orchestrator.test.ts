@@ -84,6 +84,8 @@ const runInfo: RunInfo = {
   stopWhen: undefined,
   commitMessagePath: "/repo/.gnhf/runs/run-abc/commit-message",
   commitMessage: undefined,
+  workflowPath: "/repo/.gnhf/runs/run-abc/workflow",
+  workflow: "default",
 };
 
 function createSuccessResult(summary = "done"): AgentResult {
@@ -3148,5 +3150,202 @@ describe("Orchestrator crash resilience", () => {
     expect(iterationEnd).toHaveBeenCalledTimes(1);
     expect(abort).toHaveBeenCalledWith("push failed: remote rejected push");
     expect(orchestrator.getState().status).toBe("aborted");
+  });
+});
+
+describe("Orchestrator research workflow", () => {
+  const researchRunInfo: RunInfo = { ...runInfo, workflow: "research" };
+  const usage = {
+    inputTokens: 0,
+    outputTokens: 0,
+    cacheReadTokens: 0,
+    cacheCreationTokens: 0,
+  };
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    vi.useRealTimers();
+    mockCommitAll.mockReturnValue(true);
+  });
+
+  function researchAgent(success: boolean): Agent {
+    return {
+      name: "claude",
+      run: vi.fn(async () => ({
+        output: {
+          success,
+          summary: "studied cache",
+          key_changes_made: ["ledger.md"],
+          key_learnings: ["cold start dominates"],
+          evidence_origin: "executed" as const,
+          goals_changed: ["G1", "G2"],
+          contracts_run: ["N5-1"],
+          boundary: "does not cover warm starts",
+        },
+        usage,
+      })),
+    };
+  }
+
+  it("passes the research workflow to the iteration prompt", async () => {
+    const orchestrator = new Orchestrator(
+      config,
+      researchAgent(true),
+      researchRunInfo,
+      "study it",
+      "/repo",
+      0,
+      { maxIterations: 1 },
+    );
+
+    await orchestrator.start();
+
+    expect(vi.mocked(buildIterationPrompt).mock.calls[0]![0].workflow).toBe(
+      "research",
+    );
+  });
+
+  it("passes the default workflow to the iteration prompt", async () => {
+    const orchestrator = new Orchestrator(
+      config,
+      researchAgent(true),
+      runInfo,
+      "ship it",
+      "/repo",
+      0,
+      { maxIterations: 1 },
+    );
+
+    await orchestrator.start();
+
+    expect(vi.mocked(buildIterationPrompt).mock.calls[0]![0].workflow).toBe(
+      "default",
+    );
+  });
+
+  it("records research evidence in notes and the iteration end log", async () => {
+    const orchestrator = new Orchestrator(
+      config,
+      researchAgent(true),
+      researchRunInfo,
+      "study it",
+      "/repo",
+      0,
+      { maxIterations: 1 },
+    );
+
+    await orchestrator.start();
+
+    const evidence = {
+      evidenceOrigin: "executed",
+      goalsChanged: ["G1", "G2"],
+      contractsRun: ["N5-1"],
+      boundary: "does not cover warm starts",
+    };
+    expect(mockAppendNotes).toHaveBeenCalledWith(
+      researchRunInfo.notesPath,
+      1,
+      "studied cache",
+      ["ledger.md"],
+      ["cold start dominates"],
+      evidence,
+    );
+    expect(mockAppendDebugLog).toHaveBeenCalledWith(
+      "iteration:end",
+      expect.objectContaining(evidence),
+    );
+  });
+
+  it("records research evidence for a reported failure", async () => {
+    const orchestrator = new Orchestrator(
+      config,
+      researchAgent(false),
+      researchRunInfo,
+      "study it",
+      "/repo",
+      0,
+      { maxIterations: 1 },
+    );
+
+    await orchestrator.start();
+
+    expect(mockAppendNotes).toHaveBeenCalledWith(
+      researchRunInfo.notesPath,
+      1,
+      "[FAIL] studied cache",
+      [],
+      ["cold start dominates"],
+      expect.objectContaining({ evidenceOrigin: "executed" }),
+    );
+  });
+
+  it("coerces malformed research fields instead of failing after the commit", async () => {
+    const agent: Agent = {
+      name: "claude",
+      run: vi.fn(
+        async () =>
+          ({
+            output: {
+              success: true,
+              summary: "studied cache",
+              key_changes_made: ["ledger.md"],
+              key_learnings: [],
+              evidence_origin: 5,
+              goals_changed: "G3",
+              contracts_run: null,
+              boundary: null,
+            },
+            usage,
+          }) as unknown as AgentResult,
+      ),
+    };
+    const orchestrator = new Orchestrator(
+      config,
+      agent,
+      researchRunInfo,
+      "study it",
+      "/repo",
+      0,
+      { maxIterations: 1 },
+    );
+    const iterationEnd = vi.fn();
+    orchestrator.on("iteration:end", iterationEnd);
+
+    await orchestrator.start();
+
+    expect(mockAppendNotes).toHaveBeenCalledWith(
+      researchRunInfo.notesPath,
+      1,
+      "studied cache",
+      ["ledger.md"],
+      [],
+      {
+        evidenceOrigin: "none",
+        goalsChanged: ["G3"],
+        contractsRun: [],
+        boundary: "",
+      },
+    );
+    expect(iterationEnd.mock.calls[0]![0].success).toBe(true);
+  });
+
+  it("keeps default-mode notes and iteration end log free of evidence", async () => {
+    const orchestrator = new Orchestrator(
+      config,
+      researchAgent(true),
+      runInfo,
+      "ship it",
+      "/repo",
+      0,
+      { maxIterations: 1 },
+    );
+
+    await orchestrator.start();
+
+    expect(mockAppendNotes.mock.calls[0]).toHaveLength(5);
+    const endCall = mockAppendDebugLog.mock.calls.find(
+      ([event]) => event === "iteration:end",
+    );
+    expect(endCall![1]).not.toHaveProperty("evidenceOrigin");
   });
 });

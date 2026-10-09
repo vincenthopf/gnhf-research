@@ -5,6 +5,7 @@ import {
 } from "./types.js";
 import { ClaudeAgent } from "./claude.js";
 import type { EffortLevel } from "../effort.js";
+import type { Workflow } from "../workflow.js";
 
 export const DEFAULT_CLAUDE_MODEL = "claude-opus-5-5";
 
@@ -15,6 +16,7 @@ export interface CreateAgentOptions {
   effort: EffortLevel;
   agentsPath?: string;
   appendSystemPromptPath?: string;
+  workflow?: Workflow;
 }
 
 function setsModel(args: string[] | undefined): boolean {
@@ -40,6 +42,7 @@ export function createAgent(
     schema: buildAgentOutputSchema({
       includeStopField: options.includeStopField,
       commitFields: options.commitFields,
+      research: options.workflow === "research",
     }),
   });
 }

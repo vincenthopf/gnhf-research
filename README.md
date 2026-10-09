@@ -162,7 +162,7 @@ After installing from npm, the skill is available under the installed package di
 - **Graceful interrupts** - in the interactive TUI, the first Ctrl+C requests a graceful stop and lets the current iteration finish (or ends backoff early), the second Ctrl+C force-stops immediately, and `SIGTERM` also force-stops immediately
 - **Exit summary** - after shutdown cleanup, gnhf prints a permanent stdout summary with the final branch, elapsed time, iteration and token totals, branch diff stats, notes/debug-log paths, and review commands
 - **Shared memory** - the agent reads `notes.md` (built up from prior iterations) to communicate across iterations
-- **Local run metadata** - gnhf stores prompt, notes, stop conditions, commit-message convention metadata, and a final `end-state.json` sidecar with the exit status, stop condition, agent error, and counters under `.gnhf/runs/`, and ignores it locally, so your branch only contains intentional work
+- **Local run metadata** - gnhf stores prompt, notes, stop conditions, commit-message convention metadata, the workflow, and a final `end-state.json` sidecar with the exit status, stop condition, agent error, and counters under `.gnhf/runs/`, and ignores it locally, so your branch only contains intentional work
 - **Resume support** - run `gnhf` while on an existing `gnhf/` branch to pick up where a previous run left off; if you provide a different prompt, gnhf asks whether to update the saved prompt and continue with the existing history, start a new branch, or quit. New runs whose generated branch already exists use a numeric suffix such as `gnhf/<slug>-1`. If gnhf was killed mid-iteration (crash, reboot, `SIGKILL`), resuming in any mode first commits every uncommitted change in the working tree as `gnhf <n>: wip from interrupted iteration, recovered on resume`, without running pre-commit hooks, and notes it in the run's `notes.md`. That includes edits you made after the crash. Iteration numbering then continues after it.
 
 ### Live Branch Mode
@@ -195,6 +195,21 @@ Pass `--worktree` to run each agent in an isolated [git worktree](https://git-sc
 - Known limitation: on Linux, when sleep prevention re-execs gnhf under `systemd-inhibit`, a worktree with no commits is left in place instead of being removed; remove it manually with `git worktree remove`. Tracked as `gnhf-reexec-worktree-leak-l1`.
 - `--worktree` must be run from a non-gnhf branch (typically `main`).
 
+### Research Mode
+
+Pass `--workflow research` for open-ended research objectives. Each iteration prompt gains a `## Research Workflow` section that asks the agent to re-anchor on prior notes and next-study contracts, run one bounded study, label each claim with its evidence origin and boundary, report on every goal, and never delete earlier records. Repetition is treated as a reason to change approach, not to stop.
+
+The agent's output gains four required fields:
+
+- `evidence_origin`: `executed`, `source_read`, `reasoning_only`, or `none`
+- `goals_changed`: ids of goals whose state changed this iteration
+- `contracts_run`: ids of earlier next-study contracts executed this iteration
+- `boundary`: what this iteration's evidence does not show
+
+For each iteration where the agent returned output, whether it succeeded or reported failure, gnhf adds them to the `notes.md` entry as one line, for example `**Evidence:** executed. Goals changed: G1, G2. Contracts run: N5-1. Boundary: ...`, and to the `iteration:end` debug-log event. Iterations that end in an agent error or a commit failure get no evidence line.
+
+The workflow is saved in `.gnhf/runs/<runId>/workflow`. Resuming without `--workflow` keeps the saved workflow. Passing `--workflow` on resume replaces it and rewrites the output schema.
+
 ## CLI Reference
 
 | Command                   | Description                                     |
@@ -217,6 +232,7 @@ If you run `gnhf` on an existing `gnhf/` branch with a different prompt, gnhf as
 | `--max-rate-limit-wait <duration>` | Abort after this much total Claude usage-limit wait (`30m`, `2h`, or `0`)                                     | 24h safety cap                      |
 | `--until <time>`                   | Wrap up and stop at a local time (`17:30` for its next occurrence, or `2026-10-11T06:00`)                     | none                                |
 | `--stop-when <cond>`               | End when the agent reports this condition, after any commit-failure repair; persists across resume            | unlimited                           |
+| `--workflow <name>`                | Iteration workflow (`default` or `research`); persists across resume                                          | `default`                           |
 | `--prevent-sleep <mode>`           | Prevent system sleep during the run (`on`/`off` or `true`/`false`)                                            | config file (`on`)                  |
 | `--worktree`                       | Run in a separate git worktree (enables multiple agents concurrently)                                         | `false`                             |
 | `--current-branch`                 | Run on the current branch instead of creating a `gnhf/` branch                                                | `false`                             |
@@ -273,7 +289,7 @@ preventSleep: true
 ```
 
 CLI flags override config file values. `--prevent-sleep` accepts `on`/`off` as well as `true`/`false`; the config file always uses a boolean.
-The iteration, token, and rate-limit-wait caps are runtime-only flags and are not persisted in `config.yml`; `--stop-when` is persisted per run for resume, but not in config.
+The iteration, token, and rate-limit-wait caps are runtime-only flags and are not persisted in `config.yml`; `--stop-when` and `--workflow` are persisted per run for resume, but not in config.
 
 `effort` sets Claude's reasoning effort for every iteration and is passed as `claude --effort <level>`. Valid levels are `low`, `medium`, `high`, `xhigh`, and `max`; the default is `medium`, and `--effort` overrides it for a single run without changing `config.yml`.
 
