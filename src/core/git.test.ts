@@ -176,6 +176,23 @@ describe("git utilities", () => {
       ]);
     });
 
+    it("skips commit hooks when verify is false", () => {
+      mockStagedChanges();
+
+      commitAll("wip", "/repo", { verify: false });
+
+      expect(argsOfCall(2)).toEqual([
+        "-c",
+        "commit.gpgsign=false",
+        "-c",
+        "tag.gpgsign=false",
+        "commit",
+        "--no-verify",
+        "-m",
+        "wip",
+      ]);
+    });
+
     it("disables GPG signing on the commit so a configured signing key cannot prompt", () => {
       mockStagedChanges();
 

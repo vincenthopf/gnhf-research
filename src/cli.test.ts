@@ -161,6 +161,7 @@ async function runCliWithMocks(
         : { value: String(err) },
   }));
   vi.doMock("./core/git.js", () => ({
+    commitAll: vi.fn(),
     ensureCleanWorkingTree,
     createBranch: overrides.createBranch ?? vi.fn(),
     getHeadCommit: vi.fn(() => "abc123"),
@@ -190,6 +191,8 @@ async function runCliWithMocks(
     resumeRun,
     getLastIterationNumber,
     getCompletedIterationCount,
+    getInterruptedIteration: vi.fn(() => null),
+    appendNotes: vi.fn(),
     writeRunEndState,
   }));
   vi.doMock("./core/stdin.js", () => ({ readStdinText }));
@@ -1703,6 +1706,7 @@ describe("cli", () => {
       ),
     }));
     vi.doMock("./core/git.js", () => ({
+      commitAll: vi.fn(),
       ensureCleanWorkingTree: vi.fn(),
       createBranch: vi.fn(),
       getHeadCommit: vi.fn(() => "abc123"),
@@ -1714,6 +1718,8 @@ describe("cli", () => {
       resumeRun: vi.fn(),
       getLastIterationNumber: vi.fn(() => 0),
       getCompletedIterationCount: vi.fn(() => 0),
+      getInterruptedIteration: vi.fn(() => null),
+      appendNotes: vi.fn(),
       writeRunEndState: vi.fn(),
     }));
     vi.doMock("./core/stdin.js", () => ({
@@ -1851,6 +1857,7 @@ describe("cli", () => {
       })),
     }));
     vi.doMock("./core/git.js", () => ({
+      commitAll: vi.fn(),
       ensureCleanWorkingTree: vi.fn(),
       createBranch: vi.fn(),
       getHeadCommit: vi.fn(() => "abc123"),
@@ -1870,6 +1877,8 @@ describe("cli", () => {
       })),
       getLastIterationNumber: vi.fn(() => 3),
       getCompletedIterationCount: vi.fn(() => 0),
+      getInterruptedIteration: vi.fn(() => null),
+      appendNotes: vi.fn(),
       writeRunEndState: vi.fn(),
     }));
     vi.doMock("./core/agents/factory.js", () => ({
@@ -1987,6 +1996,7 @@ describe("cli", () => {
       })),
     }));
     vi.doMock("./core/git.js", () => ({
+      commitAll: vi.fn(),
       ensureCleanWorkingTree: vi.fn(),
       createBranch: vi.fn(),
       getHeadCommit: vi.fn(() => "abc123"),
@@ -2006,6 +2016,8 @@ describe("cli", () => {
       })),
       getLastIterationNumber: vi.fn(() => 3),
       getCompletedIterationCount: vi.fn(() => 0),
+      getInterruptedIteration: vi.fn(() => null),
+      appendNotes: vi.fn(),
       writeRunEndState: vi.fn(),
     }));
     vi.doMock("./core/agents/factory.js", () => ({
@@ -2119,6 +2131,7 @@ describe("cli", () => {
       })),
     }));
     vi.doMock("./core/git.js", () => ({
+      commitAll: vi.fn(),
       ensureCleanWorkingTree: vi.fn(),
       createBranch: vi.fn(),
       getHeadCommit: vi.fn(() => "abc123"),
@@ -2138,6 +2151,8 @@ describe("cli", () => {
       })),
       getLastIterationNumber: vi.fn(() => 3),
       getCompletedIterationCount: vi.fn(() => 0),
+      getInterruptedIteration: vi.fn(() => null),
+      appendNotes: vi.fn(),
       writeRunEndState: vi.fn(),
     }));
     vi.doMock("./core/agents/factory.js", () => ({
@@ -2246,6 +2261,7 @@ describe("cli", () => {
       })),
     }));
     vi.doMock("./core/git.js", () => ({
+      commitAll: vi.fn(),
       ensureCleanWorkingTree: vi.fn(),
       createBranch: vi.fn(),
       getHeadCommit: vi.fn(() => "abc123"),
@@ -2265,6 +2281,8 @@ describe("cli", () => {
       })),
       getLastIterationNumber: vi.fn(() => 3),
       getCompletedIterationCount: vi.fn(() => 0),
+      getInterruptedIteration: vi.fn(() => null),
+      appendNotes: vi.fn(),
       writeRunEndState: vi.fn(),
     }));
     vi.doMock("./core/agents/factory.js", () => ({
@@ -2370,6 +2388,7 @@ describe("cli", () => {
       })),
     }));
     vi.doMock("./core/git.js", () => ({
+      commitAll: vi.fn(),
       ensureCleanWorkingTree: vi.fn(),
       createBranch: vi.fn(),
       getHeadCommit: vi.fn(() => "abc123"),
@@ -2389,6 +2408,8 @@ describe("cli", () => {
       })),
       getLastIterationNumber: vi.fn(() => 3),
       getCompletedIterationCount: vi.fn(() => 0),
+      getInterruptedIteration: vi.fn(() => null),
+      appendNotes: vi.fn(),
       writeRunEndState: vi.fn(),
     }));
     vi.doMock("./core/agents/factory.js", () => ({
@@ -2457,6 +2478,8 @@ describe("cli", () => {
       runId: "existing-run",
       promptPath,
     }));
+    const commitAll = vi.fn();
+    const ensureCleanWorkingTree = vi.fn();
     const resumeRun = vi.fn(() => ({
       ...stubRunInfo,
       runId: "existing-run",
@@ -2492,7 +2515,8 @@ describe("cli", () => {
       serializeError: vi.fn(),
     }));
     vi.doMock("./core/git.js", () => ({
-      ensureCleanWorkingTree: vi.fn(),
+      commitAll,
+      ensureCleanWorkingTree,
       createBranch: vi.fn(),
       getHeadCommit: vi.fn(() => "abc123"),
       getCurrentBranch: vi.fn(() => "gnhf/existing-run"),
@@ -2506,6 +2530,8 @@ describe("cli", () => {
       resumeRun,
       getLastIterationNumber: vi.fn(() => 3),
       getCompletedIterationCount: vi.fn(() => 0),
+      getInterruptedIteration: vi.fn(() => 2),
+      appendNotes: vi.fn(),
       writeRunEndState: vi.fn(),
     }));
     vi.doMock("./core/agents/factory.js", () => ({
@@ -2564,6 +2590,17 @@ describe("cli", () => {
         process.cwd(),
       );
       expect(resumeRun).toHaveBeenCalledTimes(1);
+      expect(commitAll).toHaveBeenCalledWith(
+        "gnhf 2: wip from interrupted iteration, recovered on resume",
+        process.cwd(),
+        { verify: false },
+      );
+      expect(commitAll.mock.invocationCallOrder[0]!).toBeLessThan(
+        ensureCleanWorkingTree.mock.invocationCallOrder[0]!,
+      );
+      expect(ensureCleanWorkingTree.mock.invocationCallOrder[0]!).toBeLessThan(
+        resumeRun.mock.invocationCallOrder[0]!,
+      );
       expect(resumeRun).toHaveBeenCalledWith("existing-run", process.cwd(), {
         includeStopField: false,
       });
@@ -2666,6 +2703,7 @@ describe("cli", () => {
       })),
     }));
     vi.doMock("./core/git.js", () => ({
+      commitAll: vi.fn(),
       ensureCleanWorkingTree: vi.fn(),
       createBranch: vi.fn(),
       getHeadCommit: vi.fn(() => "abc123"),
@@ -2677,6 +2715,8 @@ describe("cli", () => {
       resumeRun: vi.fn(),
       getLastIterationNumber: vi.fn(() => 0),
       getCompletedIterationCount: vi.fn(() => 0),
+      getInterruptedIteration: vi.fn(() => null),
+      appendNotes: vi.fn(),
       writeRunEndState: vi.fn(),
     }));
     vi.doMock("./core/agents/factory.js", () => ({
@@ -2812,6 +2852,7 @@ describe("cli", () => {
       })),
     }));
     vi.doMock("./core/git.js", () => ({
+      commitAll: vi.fn(),
       ensureCleanWorkingTree: vi.fn(),
       createBranch: vi.fn(),
       getHeadCommit: vi.fn(() => "abc123"),
@@ -2823,6 +2864,8 @@ describe("cli", () => {
       resumeRun: vi.fn(),
       getLastIterationNumber: vi.fn(() => 0),
       getCompletedIterationCount: vi.fn(() => 0),
+      getInterruptedIteration: vi.fn(() => null),
+      appendNotes: vi.fn(),
       writeRunEndState: vi.fn(),
     }));
     vi.doMock("./core/agents/factory.js", () => ({
@@ -2985,6 +3028,7 @@ describe("cli", () => {
       })),
     }));
     vi.doMock("./core/git.js", () => ({
+      commitAll: vi.fn(),
       ensureCleanWorkingTree: vi.fn(),
       createBranch: vi.fn(),
       getHeadCommit: vi.fn(() => "abc123"),
@@ -2996,6 +3040,8 @@ describe("cli", () => {
       resumeRun: vi.fn(),
       getLastIterationNumber: vi.fn(() => 0),
       getCompletedIterationCount: vi.fn(() => 0),
+      getInterruptedIteration: vi.fn(() => null),
+      appendNotes: vi.fn(),
       writeRunEndState: vi.fn(),
     }));
     vi.doMock("./core/agents/factory.js", () => ({
@@ -3137,6 +3183,7 @@ describe("cli", () => {
       })),
     }));
     vi.doMock("./core/git.js", () => ({
+      commitAll: vi.fn(),
       ensureCleanWorkingTree: vi.fn(),
       createBranch: vi.fn(),
       getHeadCommit: vi.fn(() => "abc123"),
@@ -3148,6 +3195,8 @@ describe("cli", () => {
       resumeRun: vi.fn(),
       getLastIterationNumber: vi.fn(() => 0),
       getCompletedIterationCount: vi.fn(() => 0),
+      getInterruptedIteration: vi.fn(() => null),
+      appendNotes: vi.fn(),
       writeRunEndState: vi.fn(),
     }));
     vi.doMock("./core/agents/factory.js", () => ({

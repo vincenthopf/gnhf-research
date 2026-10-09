@@ -136,6 +136,9 @@ if (mode === "overage-elapsed-reset" || mode === "overage-no-reset") {
 appendLog("message:start", { prompt });
 
 if (shouldHang()) {
+  if (process.env.GNHF_MOCK_CLAUDE_DIRTY_BEFORE_HANG === "1") {
+    applyWorkspaceChange();
+  }
   for (const signal of ["SIGTERM", "SIGINT"]) {
     process.on(signal, () => {
       appendLog("signal", { signal });

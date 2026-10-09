@@ -755,6 +755,115 @@ describe("gnhf e2e", () => {
     30_000,
   );
 
+  it.skipIf(process.platform === "win32").each([
+    { mode: "gnhf branch", resumeArgs: [] as string[] },
+    {
+      mode: "current branch",
+      resumeArgs: ["ship it", "--current-branch"],
+    },
+    { mode: "worktree", resumeArgs: ["ship it", "--worktree"] },
+  ])(
+    "commits the dirty tree of a crashed iteration as wip on resume ($mode)",
+    async ({ resumeArgs }) => {
+      const repo = createRepo();
+      tempDirs.push(repo, `${repo}-gnhf-worktrees`);
+      const baseCommit = git(["rev-parse", "HEAD"], repo);
+      const logDir = mkdtempSync(join(tmpdir(), "gnhf-e2e-logs-"));
+      tempDirs.push(logDir);
+      const mockLogPath = join(logDir, "mock-claude.jsonl");
+      const env = createTestEnv(mockLogPath, tempDirs);
+      const child = spawn(
+        process.execPath,
+        [
+          distCliPath,
+          "ship it",
+          ...resumeArgs.slice(1),
+          "--max-iterations",
+          "3",
+          "--prevent-sleep",
+          "off",
+          "--meteor-frequency",
+          "0",
+        ],
+        {
+          cwd: repo,
+          env: {
+            ...env,
+            GNHF_MOCK_CLAUDE_HANG_ITERATION: "2",
+            GNHF_MOCK_CLAUDE_DIRTY_BEFORE_HANG: "1",
+          },
+          stdio: ["pipe", "pipe", "pipe"],
+        },
+      );
+      child.stdin.end();
+      const exited = new Promise<void>((resolveExit) => {
+        child.on("close", () => resolveExit());
+      });
+      try {
+        await waitForLogMatch(
+          mockLogPath,
+          () =>
+            readJsonLines(mockLogPath).filter(
+              (entry) => entry.event === "workspace:changed",
+            ).length === 2,
+        );
+      } finally {
+        child.kill("SIGKILL");
+        await exited;
+        for (const entry of readJsonLines(mockLogPath)) {
+          if (entry.event === "spawn" && typeof entry.pid === "number") {
+            try {
+              process.kill(entry.pid, "SIGKILL");
+            } catch {
+              // Already gone.
+            }
+          }
+        }
+      }
+
+      const cwd = resumeArgs.includes("--worktree")
+        ? join(
+            `${repo}-gnhf-worktrees`,
+            readdirSync(`${repo}-gnhf-worktrees`)[0]!,
+          )
+        : repo;
+      const crashedMarker = readJsonLines(mockLogPath)
+        .filter((entry) => entry.event === "workspace:changed")
+        .at(-1)!.marker as string;
+      expect(git(["status", "--porcelain"], cwd)).not.toBe("");
+
+      const resumed = await runCli(
+        repo,
+        [...resumeArgs, "--max-iterations", "3", "--prevent-sleep", "off"],
+        { env },
+      );
+
+      expect(resumed.code).toBe(0);
+      expect(git(["status", "--porcelain"], cwd)).toBe("");
+      const subjects = git(
+        ["log", "--format=%s", `${baseCommit}..HEAD`],
+        cwd,
+      ).split("\n");
+      expect(subjects).toHaveLength(3);
+      expect(subjects[1]).toBe(
+        "gnhf 2: wip from interrupted iteration, recovered on resume",
+      );
+      expect(
+        git(["show", `HEAD~1:README.md`], cwd).includes(crashedMarker),
+      ).toBe(true);
+      const runsDir = join(cwd, ".gnhf", "runs");
+      const runId = readdirSync(runsDir)[0]!;
+      const notes = readFileSync(join(runsDir, runId, "notes.md"), "utf-8");
+      expect(notes).toContain("### Iteration 2");
+      expect(notes).toContain("[INTERRUPTED]");
+      const resumedPrompts = readJsonLines(mockLogPath)
+        .filter((entry) => entry.event === "message:start")
+        .map((entry) => String(entry.prompt));
+      expect(resumedPrompts.at(-1)).toContain("This is iteration 3.");
+    },
+    30_000,
+  );
+
   it.skipIf(process.platform === "win32")(
     "runs one iteration in --worktree mode and preserves the worktree with commits",
     async () => {

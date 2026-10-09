@@ -37,6 +37,7 @@ import {
   peekRunMetadata,
   toStringArray,
   getCompletedIterationCount,
+  getInterruptedIteration,
 } from "./run.js";
 import { CONVENTIONAL_COMMIT_MESSAGE } from "./commit-message.js";
 
@@ -690,5 +691,82 @@ describe("getCompletedIterationCount", () => {
     );
 
     expect(getCompletedIterationCount(runInfo)).toBe(2);
+  });
+});
+
+describe("getInterruptedIteration", () => {
+  const runDir = "/repo/.gnhf/runs/run-abc";
+  const log = (...events: Record<string, unknown>[]) =>
+    events.map((event) => JSON.stringify(event)).join("\n");
+
+  afterEach(() => {
+    mockExistsSync.mockReset();
+    mockExistsSync.mockReturnValue(false);
+    mockReadFileSync.mockReset();
+    mockReadFileSync.mockReturnValue("");
+  });
+
+  it("returns null when the run has no log", () => {
+    expect(getInterruptedIteration(runDir)).toBeNull();
+    expect(mockReadFileSync).not.toHaveBeenCalled();
+  });
+
+  it("returns an iteration that started and never closed", () => {
+    mockExistsSync.mockReturnValue(true);
+    mockReadFileSync.mockReturnValue(
+      log(
+        { event: "iteration:start", iteration: 1 },
+        { event: "iteration:end", iteration: 1 },
+        { event: "iteration:start", iteration: 2 },
+        { event: "agent:run:start", iteration: 2 },
+      ),
+    );
+
+    expect(getInterruptedIteration(runDir)).toBe(2);
+    expect(mockReadFileSync).toHaveBeenCalledWith(
+      join(runDir, "gnhf.log"),
+      "utf-8",
+    );
+  });
+
+  it.each(["iteration:end", "iteration:aborted", "iteration:stopped"])(
+    "treats %s as closing the iteration",
+    (closing) => {
+      mockExistsSync.mockReturnValue(true);
+      mockReadFileSync.mockReturnValue(
+        log(
+          { event: "iteration:start", iteration: 2 },
+          { event: closing, iteration: 2 },
+        ),
+      );
+
+      expect(getInterruptedIteration(runDir)).toBeNull();
+    },
+  );
+
+  it("treats a completed run as closing an open iteration", () => {
+    mockExistsSync.mockReturnValue(true);
+    mockReadFileSync.mockReturnValue(
+      log(
+        { event: "iteration:start", iteration: 3 },
+        { event: "run:complete", iterations: 3 },
+      ),
+    );
+
+    expect(getInterruptedIteration(runDir)).toBeNull();
+  });
+
+  it("returns an iteration reopened by a later session that never closed", () => {
+    mockExistsSync.mockReturnValue(true);
+    mockReadFileSync.mockReturnValue(
+      log(
+        { event: "iteration:start", iteration: 4 },
+        { event: "run:complete", iterations: 4 },
+        { event: "run:start" },
+        { event: "iteration:start", iteration: 4 },
+      ),
+    );
+
+    expect(getInterruptedIteration(runDir)).toBe(4);
   });
 });

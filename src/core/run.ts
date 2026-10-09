@@ -382,6 +382,44 @@ export function getCompletedIterationCount(runInfo: RunInfo): number {
   return finished.size;
 }
 
+const ITERATION_CLOSING_EVENTS = new Set([
+  "iteration:end",
+  "iteration:aborted",
+  "iteration:stopped",
+]);
+
+export function getInterruptedIteration(runDir: string): number | null {
+  const logPath = join(runDir, LOG_FILENAME);
+  if (!existsSync(logPath)) return null;
+
+  let open: number | null = null;
+  for (const line of readFileSync(logPath, "utf-8").split("\n")) {
+    if (line.length === 0) continue;
+    let event: { event?: unknown; iteration?: unknown };
+    try {
+      event = JSON.parse(line) as { event?: unknown; iteration?: unknown };
+    } catch {
+      continue;
+    }
+    if (event.event === "run:complete") {
+      open = null;
+    } else if (
+      typeof event.iteration === "number" &&
+      Number.isInteger(event.iteration)
+    ) {
+      if (event.event === "iteration:start") {
+        open = event.iteration;
+      } else if (
+        ITERATION_CLOSING_EVENTS.has(String(event.event)) &&
+        event.iteration === open
+      ) {
+        open = null;
+      }
+    }
+  }
+  return open;
+}
+
 export function toStringArray(value: unknown): string[] {
   if (Array.isArray(value)) {
     return value.filter((v): v is string => typeof v === "string");

@@ -27,6 +27,7 @@ import {
   serializeError,
 } from "./core/debug-log.js";
 import {
+  commitAll,
   ensureCleanWorkingTree,
   createBranch,
   getHeadCommit,
@@ -46,6 +47,8 @@ import {
   peekRunMetadata,
   getLastIterationNumber,
   getCompletedIterationCount,
+  getInterruptedIteration,
+  appendNotes,
   writeRunEndState,
 } from "./core/run.js";
 import { readStdinText } from "./core/stdin.js";
@@ -213,6 +216,38 @@ function buildResumeSchemaOptions(
   return buildSchemaOptions(stopWhen, commitMessage);
 }
 
+function recoverInterruptedIteration(runDir: string, cwd: string): void {
+  const iteration = getInterruptedIteration(runDir);
+  if (iteration === null) return;
+  const before = getHeadCommit(cwd);
+  try {
+    commitAll(
+      `gnhf ${iteration}: wip from interrupted iteration, recovered on resume`,
+      cwd,
+      { verify: false },
+    );
+  } catch (error) {
+    throw new Error(
+      `Could not commit the changes left by interrupted iteration ${iteration} ` +
+        `(${error instanceof Error ? error.message : String(error)}). ` +
+        `Commit or discard them in ${cwd}, then re-run gnhf.`,
+    );
+  }
+  const commit = getHeadCommit(cwd);
+  if (commit === before) return;
+  appendNotes(
+    join(runDir, "notes.md"),
+    iteration,
+    `[INTERRUPTED] gnhf stopped during this iteration. Its uncommitted changes were committed as wip commit ${commit.slice(0, 12)} on resume without checks or pre-commit hooks. Review them before building on them.`,
+    [],
+    [],
+  );
+  appendDebugLog("resume:wip-commit", { iteration, commit });
+  console.error(
+    `\n  gnhf: committed changes left by interrupted iteration ${iteration} as ${commit.slice(0, 12)}\n`,
+  );
+}
+
 function initializeNewBranch(
   prompt: string,
   cwd: string,
@@ -235,9 +270,11 @@ function resumeCurrentBranchRun(
   schemaOptions: RunSchemaOptions,
 ): RunInfo | null {
   const runId = promptRunId(prompt);
-  if (!existsSync(join(cwd, ".gnhf", "runs", runId))) {
+  const runDir = join(cwd, ".gnhf", "runs", runId);
+  if (!existsSync(runDir)) {
     return null;
   }
+  recoverInterruptedIteration(runDir, cwd);
   ensureCleanWorkingTree(cwd);
   return resumeRun(runId, cwd, schemaOptions);
 }
@@ -346,6 +383,10 @@ function initializeWorktreeRun(
           `"git worktree remove ${candidateWorktreePath}" to start fresh.`,
       );
     }
+    recoverInterruptedIteration(
+      join(candidateWorktreePath, ".gnhf", "runs", candidateRunId),
+      candidateWorktreePath,
+    );
     const runInfo = resumeRun(
       candidateRunId,
       candidateWorktreePath,
@@ -845,6 +886,7 @@ program
         );
 
         if (!prompt || prompt === existingPrompt) {
+          recoverInterruptedIteration(existingMetadata.runDir, cwd);
           const existing = resumeRun(
             existingRunId,
             cwd,
@@ -876,6 +918,7 @@ program
           );
 
           if (answer === "o") {
+            recoverInterruptedIteration(existingMetadata.runDir, cwd);
             ensureCleanWorkingTree(cwd);
             const existing = resumeRun(
               existingRunId,
