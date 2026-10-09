@@ -354,6 +354,74 @@ describe("gnhf e2e", () => {
     expect(debugEvents).toContain("git:push:success");
   }, 30_000);
 
+  it("pushes a branch that tracks origin/main to its own origin branch", async () => {
+    const cwd = createRepo();
+    tempDirs.push(cwd);
+    const remote = mkdtempSync(join(tmpdir(), "gnhf-e2e-remote-"));
+    tempDirs.push(remote);
+    git(["init", "--bare"], remote);
+    git(["remote", "add", "origin", remote], cwd);
+    git(["push", "-u", "origin", "main"], cwd);
+    git(["switch", "-c", "run-branch", "--track", "origin/main"], cwd);
+    const mainBefore = git(["rev-parse", "refs/heads/main"], remote);
+
+    const logDir = mkdtempSync(join(tmpdir(), "gnhf-e2e-logs-"));
+    tempDirs.push(logDir);
+    const mockLogPath = join(logDir, "mock-claude.jsonl");
+
+    const result = await runCli(
+      cwd,
+      ["ship it", "--max-iterations", "1", "--current-branch", "--push"],
+      {
+        env: createTestEnv(mockLogPath, tempDirs),
+      },
+    );
+
+    expect(result.code).toBe(0);
+    expect(git(["rev-parse", "refs/heads/main"], remote)).toBe(mainBefore);
+    expect(git(["rev-parse", "refs/heads/run-branch"], remote)).toBe(
+      git(["rev-parse", "HEAD"], cwd),
+    );
+    expect(git(["rev-parse", "--abbrev-ref", "@{upstream}"], cwd)).toBe(
+      "origin/run-branch",
+    );
+  }, 30_000);
+
+  it("creates gnhf branches without inheriting the current upstream", async () => {
+    const cwd = createRepo();
+    tempDirs.push(cwd);
+    const remote = mkdtempSync(join(tmpdir(), "gnhf-e2e-remote-"));
+    tempDirs.push(remote);
+    git(["init", "--bare"], remote);
+    git(["remote", "add", "origin", remote], cwd);
+    git(["push", "-u", "origin", "main"], cwd);
+    git(["config", "branch.autoSetupMerge", "inherit"], cwd);
+    const mainBefore = git(["rev-parse", "refs/heads/main"], remote);
+
+    const logDir = mkdtempSync(join(tmpdir(), "gnhf-e2e-logs-"));
+    tempDirs.push(logDir);
+    const mockLogPath = join(logDir, "mock-claude.jsonl");
+
+    const result = await runCli(
+      cwd,
+      ["ship it", "--max-iterations", "1", "--push"],
+      {
+        env: createTestEnv(mockLogPath, tempDirs),
+      },
+    );
+
+    expect(result.code).toBe(0);
+    const branch = git(["branch", "--show-current"], cwd);
+    expect(branch).toMatch(/^gnhf\//);
+    expect(git(["rev-parse", "refs/heads/main"], remote)).toBe(mainBefore);
+    expect(git(["rev-parse", `refs/heads/${branch}`], remote)).toBe(
+      git(["rev-parse", "HEAD"], cwd),
+    );
+    expect(git(["rev-parse", "--abbrev-ref", "@{upstream}"], cwd)).toBe(
+      `origin/${branch}`,
+    );
+  }, 30_000);
+
   it("sends failed pre-commit hook output back to the agent for repair", async () => {
     const cwd = createRepo();
     tempDirs.push(cwd);

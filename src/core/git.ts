@@ -117,7 +117,7 @@ export function ensureCleanWorkingTree(cwd: string): void {
 }
 
 export function createBranch(branchName: string, cwd: string): void {
-  git(["checkout", "-b", branchName], cwd);
+  git(["checkout", "--no-track", "-b", branchName], cwd);
 }
 
 export function getHeadCommit(cwd: string): string {
@@ -271,23 +271,29 @@ export function commitAll(message: string, cwd: string): void {
 }
 
 export function pushCurrentBranch(cwd: string): void {
-  let hasUpstream = true;
-  try {
+  const branch = git(["symbolic-ref", "--short", "HEAD"], cwd);
+  const branchRef = `refs/heads/${branch}`;
+  const [upstreamRemote = "", upstreamRef = "", configuredPushRemote = ""] =
     git(
-      ["rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{upstream}"],
+      [
+        "for-each-ref",
+        "--format=%(upstream:remotename)%09%(upstream:remoteref)%09%(push:remotename)",
+        branchRef,
+      ],
       cwd,
-    );
-  } catch {
-    hasUpstream = false;
-  }
+    ).split("\t");
+  const pushRemote = configuredPushRemote || upstreamRemote || "origin";
+  const setUpstream =
+    !upstreamRemote ||
+    (upstreamRemote === pushRemote && upstreamRef !== branchRef);
 
-  if (hasUpstream) {
-    git(["push"], cwd);
+  if (!setUpstream) {
+    git(["push", pushRemote, `HEAD:${branchRef}`], cwd);
     return;
   }
 
-  git(["remote", "get-url", "origin"], cwd);
-  git(["push", "-u", "origin", "HEAD"], cwd);
+  git(["remote", "get-url", pushRemote], cwd);
+  git(["push", "-u", pushRemote, `HEAD:${branchRef}`], cwd);
 }
 
 export function resetHard(cwd: string): void {
@@ -304,7 +310,10 @@ export function createWorktree(
   worktreePath: string,
   branchName: string,
 ): void {
-  git(["worktree", "add", "-b", branchName, worktreePath], baseCwd);
+  git(
+    ["worktree", "add", "--no-track", "-b", branchName, worktreePath],
+    baseCwd,
+  );
 }
 
 export function removeWorktree(baseCwd: string, worktreePath: string): void {

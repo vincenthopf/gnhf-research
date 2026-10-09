@@ -11,7 +11,12 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 
-import { CommitFailedError, commitAll, createBranch } from "./git.js";
+import {
+  CommitFailedError,
+  commitAll,
+  createBranch,
+  pushCurrentBranch,
+} from "./git.js";
 
 function rawGit(args: string[], cwd: string): string {
   return execFileSync("git", args, { cwd, encoding: "utf-8" }).trim();
@@ -112,5 +117,25 @@ describe("git shell injection regression", () => {
     expect(existsSync(marker)).toBe(false);
     expect(existsSync(repoMarker)).toBe(false);
     expect(rawGit(["branch", "--show-current"], repo)).toBe(injected);
+  });
+
+  it("pushCurrentBranch treats shell metacharacters in the branch name as inert text", () => {
+    const repo = makeRepo();
+    repos.push(repo);
+    const remote = mkdtempSync(join(tmpdir(), "gnhf-injection-remote-"));
+    repos.push(remote);
+    rawGit(["init", "--bare"], remote);
+    rawGit(["remote", "add", "origin", remote], repo);
+    const repoMarker = join(repo, markerName);
+    const injected = `evil$(touch\${IFS}${markerName})`;
+    createBranch(injected, repo);
+
+    pushCurrentBranch(repo);
+
+    expect(existsSync(marker)).toBe(false);
+    expect(existsSync(repoMarker)).toBe(false);
+    expect(rawGit(["rev-parse", `refs/heads/${injected}`], remote)).toBe(
+      rawGit(["rev-parse", "HEAD"], repo),
+    );
   });
 });

@@ -172,7 +172,8 @@ Together, `--current-branch --push` is useful for loose projects where you want 
 - Re-running the same prompt with `--current-branch` resumes the existing `.gnhf/runs/<runId>/` history on a clean working tree and continues iteration numbering.
 - Push failures abort the run after preserving the successful local commit.
 - gnhf never force-pushes or auto-pulls for this mode.
-- `--push` also works with the default `gnhf/` branch mode and sets `origin` as the upstream when needed.
+- `--push` also works with the default `gnhf/` branch mode.
+- gnhf creates its branches without an upstream. Each push sends the current branch to the same-named branch on its push remote (`origin` unless `branch.<name>.pushRemote` or `remote.pushDefault` says otherwise). If the branch has no upstream, or its upstream on that remote is a different branch such as `origin/main`, gnhf sets the pushed branch as the new upstream. This stops a run branch created from `origin/main` from failing its first push or pushing to `main`.
 - Do not combine `--current-branch` with `--worktree`; gnhf exits with an error because those modes choose different working directories.
 
 ### Worktree Mode
