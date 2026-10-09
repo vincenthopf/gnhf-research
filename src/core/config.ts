@@ -25,6 +25,7 @@ export interface Config {
   appendSystemPrompt?: string;
   commitMessage?: CommitMessageConfig;
   maxConsecutiveFailures: number;
+  observerEvery: number;
   preventSleep: boolean;
 }
 
@@ -34,6 +35,7 @@ const DEFAULT_CONFIG: Config = {
   agentArgsOverride: {},
   effort: DEFAULT_EFFORT,
   maxConsecutiveFailures: 3,
+  observerEvery: 5,
   preventSleep: true,
 };
 
@@ -327,6 +329,15 @@ function normalizeEffort(value: unknown): EffortLevel {
   );
 }
 
+function normalizeObserverEvery(value: unknown): number {
+  if (typeof value === "number" && Number.isInteger(value) && value >= 0) {
+    return value;
+  }
+  throw new InvalidConfigError(
+    `Invalid config value for observerEvery: ${JSON.stringify(value)}. Use a whole number of iterations, or 0 to disable observer passes.`,
+  );
+}
+
 type RawConfig = Partial<Config> & {
   agent?: unknown;
   acpRegistryOverrides?: unknown;
@@ -412,6 +423,12 @@ function normalizeConfig(
     }
   } else {
     delete normalized.agentModel;
+  }
+
+  if (config.observerEvery === undefined || config.observerEvery === null) {
+    delete normalized.observerEvery;
+  } else {
+    normalized.observerEvery = normalizeObserverEvery(config.observerEvery);
   }
 
   if (Object.prototype.hasOwnProperty.call(config, "effort")) {
@@ -562,6 +579,9 @@ function serializeConfig(config: Config): string {
     "",
     "# Abort after this many consecutive failures",
     `maxConsecutiveFailures: ${config.maxConsecutiveFailures}`,
+    "",
+    "# Research runs: run the six observer subagents every n iterations (0 disables)",
+    `observerEvery: ${config.observerEvery}`,
     "",
     "# Prevent the machine from sleeping during a run",
     `preventSleep: ${config.preventSleep}`,

@@ -77,6 +77,7 @@ const config: Config = {
   agentArgsOverride: {},
   effort: "medium",
   maxConsecutiveFailures: 3,
+  observerEvery: 5,
   preventSleep: true,
 };
 
@@ -3840,5 +3841,317 @@ describe("Orchestrator research ledger", () => {
 
     expect(mockResetHard).toHaveBeenCalled();
     expect(readFileSync(ledgerInfo.ledgerPath!, "utf-8")).toBe(r1);
+  });
+});
+
+describe("Orchestrator research stats and stall signal", () => {
+  const usage = {
+    inputTokens: 0,
+    outputTokens: 0,
+    cacheReadTokens: 0,
+    cacheCreationTokens: 0,
+  };
+  let dir: string;
+  let statsInfo: RunInfo;
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    vi.useRealTimers();
+    mockCommitAll.mockReturnValue(true);
+    dir = mkdtempSync(join(tmpdir(), "gnhf-research-stats-"));
+    const runDir = join(dir, ".gnhf", "runs", "run-abc");
+    mkdirSync(join(runDir, "ledger"), { recursive: true });
+    statsInfo = {
+      ...runInfo,
+      runDir,
+      logPath: join(runDir, "gnhf.log"),
+      workflow: "research",
+      ledgerPath: join(runDir, "ledger", "records.jsonl"),
+    };
+    writeFileSync(statsInfo.ledgerPath!, "", "utf-8");
+  });
+
+  afterEach(() => {
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  type Step = {
+    origin: "executed" | "source_read" | "reasoning_only" | "none";
+    goals?: string[];
+    contracts?: string[];
+    records?: Record<string, unknown>[];
+  };
+
+  function evidenceAgent(steps: Step[]): Agent {
+    let call = 0;
+    return {
+      name: "claude",
+      run: vi.fn(async () => {
+        const step = steps[Math.min(call, steps.length - 1)]!;
+        call++;
+        for (const record of step.records ?? []) {
+          writeFileSync(
+            statsInfo.ledgerPath!,
+            `${readFileSync(statsInfo.ledgerPath!, "utf-8")}${JSON.stringify(record)}\n`,
+            "utf-8",
+          );
+        }
+        return {
+          output: {
+            success: true,
+            summary: "studied",
+            key_changes_made: ["x"],
+            key_learnings: [],
+            evidence_origin: step.origin,
+            goals_changed: step.goals ?? ["G1"],
+            contracts_run: step.contracts ?? [],
+            boundary: "b",
+          },
+          usage,
+        };
+      }),
+    };
+  }
+
+  function promptParams(): Array<Record<string, unknown>> {
+    return vi
+      .mocked(buildIterationPrompt)
+      .mock.calls.map(([params]) => params as Record<string, unknown>);
+  }
+
+  function run(
+    agent: Agent,
+    maxIterations: number,
+    overrides: Partial<Config> = {},
+    info: RunInfo = statsInfo,
+  ): Orchestrator {
+    return new Orchestrator(
+      { ...config, ...overrides },
+      agent,
+      info,
+      "study it",
+      dir,
+      0,
+      { maxIterations },
+    );
+  }
+
+  it("exposes research stats computed from iterations and the validated ledger", async () => {
+    const record = (id: string, extra: Record<string, unknown> = {}) => ({
+      id,
+      iteration: 1,
+      evidence_origin: "executed",
+      claim: `claim ${id}`,
+      ...extra,
+    });
+    const orchestrator = run(
+      evidenceAgent([
+        {
+          origin: "executed",
+          records: [
+            record("c1", { type: "contract", boundary: "b" }),
+            record("c2", { type: "contract", boundary: "b" }),
+            record("c3", { type: "contract" }),
+            record("r1"),
+          ],
+        },
+        { origin: "reasoning_only", goals: [], contracts: ["c1"] },
+        {
+          origin: "source_read",
+          goals: [],
+          records: [record("r2", { reframes: "c2", boundary: "b" })],
+        },
+      ]),
+      3,
+    );
+
+    await orchestrator.start();
+
+    expect(orchestrator.getState().research).toEqual({
+      executed: 1,
+      sourceRead: 1,
+      reasoningOnly: 1,
+      noEvidence: 0,
+      goalsStale: 2,
+      reasoningStreak: 0,
+      openContracts: 1,
+      missingBoundary: 2,
+    });
+  });
+
+  it("leaves research stats out of the default workflow state", async () => {
+    const orchestrator = run(
+      evidenceAgent([{ origin: "executed" }]),
+      1,
+      {},
+      { ...statsInfo, workflow: "default", ledgerPath: undefined },
+    );
+
+    await orchestrator.start();
+
+    expect(orchestrator.getState()).not.toHaveProperty("research");
+    for (const params of promptParams()) {
+      expect(params).not.toHaveProperty("stall");
+      expect(params).not.toHaveProperty("observerPass");
+    }
+  });
+
+  it("asks for a change of approach and an observer pass after three reasoning_only iterations without stopping", async () => {
+    const agent = evidenceAgent([{ origin: "reasoning_only" }]);
+    const orchestrator = run(agent, 5);
+
+    await orchestrator.start();
+
+    expect(agent.run).toHaveBeenCalledTimes(5);
+    const params = promptParams();
+    expect(params.slice(0, 3).map((p) => p.stall)).toEqual([
+      undefined,
+      undefined,
+      undefined,
+    ]);
+    expect(params[3]!.stall).toEqual([{ signal: "reasoning", iterations: 3 }]);
+    expect(params[3]!.observerPass).toBe(
+      "the stall signal fired after iteration 3",
+    );
+    expect(params[4]).not.toHaveProperty("stall");
+    expect(params[4]).not.toHaveProperty("observerPass");
+    expect(mockAppendDebugLog).toHaveBeenCalledWith(
+      "research:stall",
+      expect.objectContaining({
+        iteration: 3,
+        signals: ["reasoning"],
+        reasoningStreak: 3,
+      }),
+    );
+    expect(
+      mockAppendDebugLog.mock.calls.filter(
+        ([event]) => event === "research:stall",
+      ),
+    ).toHaveLength(1);
+    expect(orchestrator.getState().lastMessage).toBe(
+      "max iterations reached (5)",
+    );
+  });
+
+  it("fires the goals signal after three iterations with no goal change", async () => {
+    const orchestrator = run(
+      evidenceAgent([{ origin: "executed", goals: [] }]),
+      4,
+    );
+
+    await orchestrator.start();
+
+    expect(promptParams()[3]).toHaveProperty("finalIteration");
+    expect(promptParams()[3]).not.toHaveProperty("stall");
+    expect(mockAppendDebugLog).toHaveBeenCalledWith(
+      "research:stall",
+      expect.objectContaining({ iteration: 3, signals: ["goals"] }),
+    );
+  });
+
+  it("names the goals signal in the next prompt", async () => {
+    const orchestrator = run(
+      evidenceAgent([{ origin: "executed", goals: [] }]),
+      5,
+    );
+
+    await orchestrator.start();
+
+    expect(promptParams()[3]!.stall).toEqual([
+      { signal: "goals", iterations: 3 },
+    ]);
+  });
+
+  it("schedules an observer pass every observerEvery iterations", async () => {
+    const orchestrator = run(evidenceAgent([{ origin: "executed" }]), 5, {
+      observerEvery: 2,
+    });
+
+    await orchestrator.start();
+
+    expect(promptParams().map((p) => p.observerPass)).toEqual([
+      undefined,
+      "iteration 2 is a multiple of observerEvery (2)",
+      undefined,
+      "iteration 4 is a multiple of observerEvery (2)",
+      undefined,
+    ]);
+  });
+
+  it("defaults observerEvery to 5 and skips the observer on the final iteration", async () => {
+    const orchestrator = run(evidenceAgent([{ origin: "executed" }]), 6);
+
+    await orchestrator.start();
+
+    const params = promptParams();
+    expect(params[4]!.observerPass).toBe(
+      "iteration 5 is a multiple of observerEvery (5)",
+    );
+    expect(params.filter((p) => p.observerPass !== undefined)).toHaveLength(1);
+  });
+
+  it("disables the scheduled observer pass when observerEvery is 0", async () => {
+    const orchestrator = run(evidenceAgent([{ origin: "executed" }]), 4, {
+      observerEvery: 0,
+    });
+
+    await orchestrator.start();
+
+    expect(
+      promptParams().filter((p) => p.observerPass !== undefined),
+    ).toHaveLength(0);
+  });
+
+  it("rebuilds research stats and the stall signal from gnhf.log on resume", async () => {
+    writeFileSync(
+      statsInfo.logPath,
+      [1, 2, 3]
+        .map((iteration) =>
+          JSON.stringify({
+            event: "iteration:end",
+            iteration,
+            evidenceOrigin: "reasoning_only",
+            goalsChanged: ["G1"],
+            contractsRun: [],
+            boundary: "",
+          }),
+        )
+        .join("\n") + "\n",
+      "utf-8",
+    );
+    writeFileSync(
+      join(statsInfo.runDir, "ledger", "validated.jsonl"),
+      `${JSON.stringify({ id: "c1", iteration: 1, evidence_origin: "none", claim: "next", type: "contract" })}\n`,
+      "utf-8",
+    );
+    const orchestrator = new Orchestrator(
+      config,
+      evidenceAgent([{ origin: "executed" }]),
+      statsInfo,
+      "study it",
+      dir,
+      3,
+      { maxIterations: 5 },
+    );
+
+    expect(orchestrator.getState().research).toMatchObject({
+      reasoningOnly: 3,
+      reasoningStreak: 3,
+      openContracts: 1,
+      missingBoundary: 1,
+    });
+
+    await orchestrator.start();
+
+    expect(promptParams()[0]).toMatchObject({
+      n: 4,
+      stall: [{ signal: "reasoning", iterations: 3 }],
+      observerPass: "the stall signal fired after iteration 3",
+    });
+    expect(orchestrator.getState().research).toMatchObject({
+      executed: 2,
+      reasoningOnly: 3,
+      reasoningStreak: 0,
+    });
   });
 });

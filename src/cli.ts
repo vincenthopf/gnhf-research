@@ -1367,11 +1367,15 @@ program
           terminalColumns: process.stdout.columns,
           hasPendingCommitFailure: finalState.hasPendingCommitFailure,
           sleepPreventionNotice,
+          ...(finalState.research === undefined
+            ? {}
+            : { research: finalState.research }),
         });
 
         appendDebugLog("run:complete", {
           signal: shutdownSignal,
           status: finalState.status,
+          research: finalState.research,
           iterations: finalState.currentIteration,
           successCount: finalState.successCount,
           failCount: finalState.failCount,

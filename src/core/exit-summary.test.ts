@@ -58,6 +58,37 @@ describe("renderExitSummary", () => {
     expect(summary).not.toContain("moon log");
   });
 
+  it("prints research stats below the files line for research runs", () => {
+    const summary = stripExitSummaryAnsi(
+      renderExitSummary({
+        ...baseSummary,
+        color: false,
+        research: {
+          executed: 3,
+          sourceRead: 0,
+          reasoningOnly: 1,
+          noEvidence: 0,
+          goalsStale: 2,
+          reasoningStreak: 0,
+          openContracts: 4,
+          missingBoundary: 1,
+        },
+      }),
+    );
+
+    expect(summary).toContain(
+      "files           7 added       9 updated    2 deleted\n  research        exec 3 · reason 1 · goals stale 2 · open contracts 4 · no boundary 1\n",
+    );
+  });
+
+  it("omits the research line without research stats", () => {
+    const summary = stripExitSummaryAnsi(
+      renderExitSummary({ ...baseSummary, color: false }),
+    );
+
+    expect(summary).not.toContain("research");
+  });
+
   it("marks estimated token totals with a tilde", () => {
     const summary = stripExitSummaryAnsi(
       renderExitSummary({

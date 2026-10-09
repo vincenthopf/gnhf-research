@@ -359,6 +359,64 @@ describe("gnhf e2e", () => {
     expect(prompts[1]).toContain("## Research Workflow");
   }, 30_000);
 
+  it("asks for a change of approach after three reasoning_only iterations and prints research stats", async () => {
+    const cwd = createRepo();
+    tempDirs.push(cwd);
+    const logDir = mkdtempSync(join(tmpdir(), "gnhf-e2e-logs-"));
+    tempDirs.push(logDir);
+    const mockLogPath = join(logDir, "mock-claude.jsonl");
+    const env = {
+      ...createTestEnv(mockLogPath, tempDirs),
+      GNHF_MOCK_CLAUDE_EVIDENCE_ORIGIN: "reasoning_only",
+      GNHF_MOCK_CLAUDE_LEDGER: "append",
+    };
+
+    const result = await runCli(
+      cwd,
+      ["study it", "--workflow", "research", "--max-iterations", "5"],
+      { env },
+    );
+
+    expect(result.code).toBe(0);
+    expect(result.stdout).toContain("max iterations reached (5)");
+    const prompts = readJsonLines(mockLogPath)
+      .filter((entry) => entry.event === "spawn")
+      .map((entry) => String(entry.prompt));
+    expect(prompts).toHaveLength(5);
+    for (const prompt of prompts.slice(0, 3)) {
+      expect(prompt).not.toContain("## Change Approach");
+      expect(prompt).not.toContain("## Observer Pass");
+    }
+    expect(prompts[3]).toContain("## Change Approach");
+    expect(prompts[3]).toContain(
+      "- the last 3 research iterations were reasoning_only",
+    );
+    expect(prompts[3]).toContain("## Observer Pass");
+    expect(prompts[3]).toContain("observer-frontier-exposure");
+    expect(prompts[3]!.indexOf("## Observer Pass")).toBeLessThan(
+      prompts[3]!.indexOf("## Objective"),
+    );
+    expect(prompts[4]).toContain("## Final Iteration");
+    expect(prompts[4]).not.toContain("## Change Approach");
+    expect(prompts[4]).not.toContain("## Observer Pass");
+    expect(result.stdout).toContain(
+      "exec 0 · reason 5 · goals stale 0 · open contracts 0 · no boundary 5",
+    );
+    const runDir = dirname(findRunLogPath(cwd));
+    const stalls = readJsonLines(join(runDir, "gnhf.log")).filter(
+      (entry) => entry.event === "research:stall",
+    );
+    expect(stalls).toEqual([
+      expect.objectContaining({ iteration: 3, signals: ["reasoning"] }),
+    ]);
+
+    const resumed = await runCli(cwd, ["--max-iterations", "6"], { env });
+    expect(resumed.code).toBe(0);
+    expect(resumed.stdout).toContain(
+      "exec 0 · reason 6 · goals stale 0 · open contracts 0 · no boundary 6",
+    );
+  }, 30_000);
+
   it("rejects an iteration that rewrites an earlier ledger line and tells the next iteration", async () => {
     const cwd = createRepo();
     tempDirs.push(cwd);

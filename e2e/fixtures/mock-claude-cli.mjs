@@ -18,7 +18,8 @@ const schemaIndex = args.indexOf("--json-schema");
 const schema = schemaIndex === -1 ? "" : (args[schemaIndex + 1] ?? "");
 const researchOutput = schema.includes("evidence_origin")
   ? {
-      evidence_origin: "executed",
+      evidence_origin:
+        process.env.GNHF_MOCK_CLAUDE_EVIDENCE_ORIGIN ?? "executed",
       goals_changed: ["G1"],
       contracts_run: [],
       boundary: "mock boundary",

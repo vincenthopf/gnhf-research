@@ -2,7 +2,17 @@ import {
   getCommitMessagePromptFields,
   type CommitMessageConfig,
 } from "../core/commit-message.js";
+import type { StallReport } from "../core/research-stats.js";
 import type { Workflow } from "../core/workflow.js";
+
+const OBSERVER_AGENTS = [
+  "observer-account-evidence",
+  "observer-variation-invariance",
+  "observer-means-inspectability",
+  "observer-cross-context",
+  "observer-purpose-contribution",
+  "observer-frontier-exposure",
+];
 
 const RESEARCH_OUTPUT_FIELDS = [
   "- evidence_origin: executed, source_read, reasoning_only, or none. executed means you ran code, a test, a benchmark or an experiment this iteration. source_read means your strongest evidence came from reading sources. reasoning_only means nothing was executed or read. none means this iteration made no claim",
@@ -22,7 +32,7 @@ Each iteration continues this cycle. Keep the records in the files the objective
 4. Execute one bounded study: run it with matched controls when possible. If nothing was executed, label the iteration source_read or reasoning_only, whichever is true
 5. Evidence records: each claim states its evidence origin and its boundary, which is what the claim does NOT show
 6. Cross-goal return: state for every goal what changed and what stays open, and list the changed goals in goals_changed
-7. Next contracts: register the next studies, each with what would show it worked, and list the contracts executed this iteration in contracts_run
+7. Next contracts: register each next study as a ledger record with "type": "contract" that states what would show it worked, and list the ids of contracts executed this iteration in contracts_run. A contract stays open until its id appears in contracts_run or a later record reframes it
 8. Never delete: reframe an earlier record by adding a new record. Never edit or remove earlier records
 
 Repetition is a reason to change approach, not to stop.`;
@@ -44,6 +54,29 @@ Optional fields: boundary (what the claim does NOT show), sources, next, and ref
 The ledger is append only. Never edit, reorder or delete an earlier line. To revise a record, append a new record whose reframes field names the earlier id. gnhf checks the ledger before each iteration starts and after each iteration that returns a result. If a line is not a JSON object, a required field is missing or has the wrong type, an id repeats, or an earlier line changed, gnhf saves the rejected ledger to a file, restores the last validated content, fails the iteration that made the change when it returned a result, and states the reason in the next prompt.`;
 }
 
+function describeStall(report: StallReport): string {
+  return report.signal === "goals"
+    ? `- the last ${report.iterations} research iterations changed no goal (goals_changed was empty)`
+    : `- the last ${report.iterations} research iterations were reasoning_only`;
+}
+
+function buildChangeApproachSection(stall: StallReport[]): string {
+  return `\n\n## Change Approach
+
+gnhf detected a stall:
+${stall.map(describeStall).join("\n")}
+
+Change approach in this iteration: run an executed study or an observer pass. Do not stop the run and do not treat the repetition as a reason to finish.`;
+}
+
+function buildObserverSection(reason: string): string {
+  return `\n\n## Observer Pass
+
+This iteration includes an observer pass: ${reason}.
+Run these six subagents in parallel over the ledger and the run's artifacts: ${OBSERVER_AGENTS.join(", ")}.
+Append each lead they return to the ledger as a record with evidence_origin "none" or "reasoning_only" and an "observer" field naming the subagent. Observer records are leads, not evidence: do not count them toward a claim, goal or contract until an executed or source_read study confirms them.`;
+}
+
 export function buildIterationPrompt(params: {
   n: number;
   runId: string;
@@ -54,6 +87,8 @@ export function buildIterationPrompt(params: {
   finalIteration?: { reason: string; wrapUpOnly: boolean };
   workflow?: Workflow;
   ledgerPath?: string;
+  stall?: StallReport[];
+  observerPass?: string;
 }): string {
   const research = params.workflow === "research";
   const outputFields = [
@@ -106,7 +141,13 @@ export function buildIterationPrompt(params: {
     ? buildResearchSection(params.runId) +
       (params.ledgerPath === undefined
         ? ""
-        : buildLedgerSection(params.ledgerPath))
+        : buildLedgerSection(params.ledgerPath)) +
+      (params.stall === undefined || params.stall.length === 0
+        ? ""
+        : buildChangeApproachSection(params.stall)) +
+      (params.observerPass === undefined
+        ? ""
+        : buildObserverSection(params.observerPass))
     : "";
 
   return `You are working autonomously towards an objective given below.

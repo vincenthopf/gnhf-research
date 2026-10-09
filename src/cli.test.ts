@@ -383,6 +383,7 @@ async function runSigintCliTest({
       agentArgsOverride: {},
       effort: "medium",
       maxConsecutiveFailures: 3,
+      observerEvery: 5,
       preventSleep: false,
     })),
   }));
@@ -551,6 +552,7 @@ async function runCliResumeWithActualRun(
         : { commitMessage: opts.liveCommitMessage }),
       effort: "medium",
       maxConsecutiveFailures: 3,
+      observerEvery: 5,
       preventSleep: false,
     })),
   }));
@@ -680,6 +682,7 @@ describe("cli", () => {
       },
       effort: "medium",
       maxConsecutiveFailures: 3,
+      observerEvery: 5,
       preventSleep: false,
     });
 
@@ -697,6 +700,7 @@ describe("cli", () => {
       agentArgsOverride: {},
       effort: "medium",
       maxConsecutiveFailures: 3,
+      observerEvery: 5,
       preventSleep: false,
     });
 
@@ -712,6 +716,7 @@ describe("cli", () => {
       agentArgsOverride: {},
       effort: "medium",
       maxConsecutiveFailures: 3,
+      observerEvery: 5,
       preventSleep: false,
     });
 
@@ -729,6 +734,7 @@ describe("cli", () => {
       agentArgsOverride: {},
       effort: "low" as const,
       maxConsecutiveFailures: 3,
+      observerEvery: 5,
       preventSleep: false,
     };
 
@@ -759,6 +765,7 @@ describe("cli", () => {
         agentArgsOverride: {},
         effort: "medium",
         maxConsecutiveFailures: 3,
+        observerEvery: 5,
         preventSleep: false,
       }),
     ).rejects.toThrow("process.exit unexpectedly called with 1");
@@ -772,6 +779,7 @@ describe("cli", () => {
         agentArgsOverride: {},
         effort: "medium",
         maxConsecutiveFailures: 3,
+        observerEvery: 5,
         preventSleep: false,
       }),
     ).rejects.toThrow("process.exit unexpectedly called with 1");
@@ -786,6 +794,7 @@ describe("cli", () => {
         agentArgsOverride: {},
         effort: "medium",
         maxConsecutiveFailures: 3,
+        observerEvery: 5,
         preventSleep: false,
       },
       {
@@ -837,6 +846,7 @@ describe("cli", () => {
           agentArgsOverride: {},
           effort: "medium",
           maxConsecutiveFailures: 3,
+          observerEvery: 5,
           preventSleep: false,
         },
         { writeRunEndState },
@@ -867,6 +877,7 @@ describe("cli", () => {
         agentArgsOverride: {},
         effort: "medium",
         maxConsecutiveFailures: 3,
+        observerEvery: 5,
         preventSleep: false,
       },
     );
@@ -886,6 +897,7 @@ describe("cli", () => {
       commitMessage: CONVENTIONAL_COMMIT_MESSAGE,
       effort: "medium",
       maxConsecutiveFailures: 3,
+      observerEvery: 5,
       preventSleep: false,
     });
 
@@ -933,6 +945,7 @@ describe("cli", () => {
         commitMessage: CONVENTIONAL_COMMIT_MESSAGE,
         effort: "medium",
         maxConsecutiveFailures: 3,
+        observerEvery: 5,
         preventSleep: false,
       },
     );
@@ -990,6 +1003,7 @@ describe("cli", () => {
               agentArgsOverride: {},
               effort: "medium",
               maxConsecutiveFailures: 3,
+              observerEvery: 5,
               preventSleep: false,
             },
             { createAgent, consoleErrorSink },
@@ -1014,6 +1028,7 @@ describe("cli", () => {
         agentArgsOverride: {},
         effort: "medium",
         maxConsecutiveFailures: 3,
+        observerEvery: 5,
         preventSleep: false,
       },
       {
@@ -1048,6 +1063,7 @@ describe("cli", () => {
         agentArgsOverride: {},
         effort: "medium",
         maxConsecutiveFailures: 3,
+        observerEvery: 5,
         preventSleep: false,
       },
     );
@@ -1083,6 +1099,7 @@ describe("cli", () => {
             agentArgsOverride: {},
             effort: "medium",
             maxConsecutiveFailures: 3,
+            observerEvery: 5,
             preventSleep: false,
           },
           { createAgent, setupRun, consoleErrorSink },
@@ -1111,6 +1128,7 @@ describe("cli", () => {
             agentArgsOverride: {},
             effort: "medium",
             maxConsecutiveFailures: 3,
+            observerEvery: 5,
             preventSleep: false,
           },
           { createAgent },
@@ -1134,6 +1152,7 @@ describe("cli", () => {
         agentArgsOverride: {},
         effort: "medium",
         maxConsecutiveFailures: 3,
+        observerEvery: 5,
         preventSleep: false,
       },
       {
@@ -1395,6 +1414,7 @@ describe("cli", () => {
         agentArgsOverride: {},
         effort: "medium",
         maxConsecutiveFailures: 3,
+        observerEvery: 5,
         preventSleep: false,
       },
     );
@@ -1417,6 +1437,7 @@ describe("cli", () => {
         agentArgsOverride: {},
         effort: "medium",
         maxConsecutiveFailures: 3,
+        observerEvery: 5,
         preventSleep: false,
       },
     );
@@ -1437,6 +1458,7 @@ describe("cli", () => {
       agentArgsOverride: {},
       effort: "medium",
       maxConsecutiveFailures: 3,
+      observerEvery: 5,
       preventSleep: false,
     });
 
@@ -1459,6 +1481,7 @@ describe("cli", () => {
         agentArgsOverride: {},
         effort: "medium",
         maxConsecutiveFailures: 3,
+        observerEvery: 5,
         preventSleep: false,
       },
     );
@@ -1474,6 +1497,7 @@ describe("cli", () => {
       agentArgsOverride: {},
       effort: "medium",
       maxConsecutiveFailures: 3,
+      observerEvery: 5,
       preventSleep: false,
     });
 
@@ -1488,6 +1512,7 @@ describe("cli", () => {
       agentArgsOverride: {},
       effort: "medium",
       maxConsecutiveFailures: 3,
+      observerEvery: 5,
       preventSleep: false,
     });
 
@@ -1507,6 +1532,7 @@ describe("cli", () => {
         agentArgsOverride: {},
         effort: "medium",
         maxConsecutiveFailures: 3,
+        observerEvery: 5,
         preventSleep: false,
       },
       { createBranch },
@@ -1549,6 +1575,7 @@ describe("cli", () => {
           agentArgsOverride: {},
           effort: "medium",
           maxConsecutiveFailures: 3,
+          observerEvery: 5,
           preventSleep: false,
         },
         { resumeRun, getLastIterationNumber, getCompletedIterationCount },
@@ -1602,6 +1629,7 @@ describe("cli", () => {
           agentArgsOverride: {},
           effort: "medium",
           maxConsecutiveFailures: 3,
+          observerEvery: 5,
           preventSleep: false,
         },
         { resumeRun },
@@ -1623,6 +1651,7 @@ describe("cli", () => {
           agentArgsOverride: {},
           effort: "medium",
           maxConsecutiveFailures: 3,
+          observerEvery: 5,
           preventSleep: false,
         },
         { resumeRun },
@@ -1662,6 +1691,7 @@ describe("cli", () => {
           agentArgsOverride: {},
           effort: "medium",
           maxConsecutiveFailures: 3,
+          observerEvery: 5,
           preventSleep: false,
         },
         { ensureCleanWorkingTree, resumeRun },
@@ -1685,6 +1715,7 @@ describe("cli", () => {
         agentArgsOverride: {},
         effort: "medium",
         maxConsecutiveFailures: 3,
+        observerEvery: 5,
         preventSleep: false,
       }),
     ).rejects.toThrow("process.exit unexpectedly called with 1");
@@ -1698,6 +1729,7 @@ describe("cli", () => {
         agentArgsOverride: {},
         effort: "medium",
         maxConsecutiveFailures: 3,
+        observerEvery: 5,
         preventSleep: false,
       });
 
@@ -1710,6 +1742,7 @@ describe("cli", () => {
       agentArgsOverride: {},
       effort: "medium",
       maxConsecutiveFailures: 3,
+      observerEvery: 5,
       preventSleep: false,
     });
   });
@@ -1731,6 +1764,7 @@ describe("cli", () => {
         agentArgsOverride: {},
         effort: "medium",
         maxConsecutiveFailures: 3,
+        observerEvery: 5,
         preventSleep: true,
       },
       { startSleepPrevention },
@@ -1757,6 +1791,7 @@ describe("cli", () => {
         agentArgsOverride: {},
         effort: "medium",
         maxConsecutiveFailures: 3,
+        observerEvery: 5,
         preventSleep: true,
       },
       { startSleepPrevention },
@@ -1791,6 +1826,7 @@ describe("cli", () => {
         agentArgsOverride: {},
         effort: "medium",
         maxConsecutiveFailures: 3,
+        observerEvery: 5,
         preventSleep: true,
       },
       { startSleepPrevention },
@@ -1817,6 +1853,7 @@ describe("cli", () => {
           agentArgsOverride: {},
           effort: "medium",
           maxConsecutiveFailures: 3,
+          observerEvery: 5,
           preventSleep: true,
         },
         { appendDebugLog, startSleepPrevention },
@@ -1851,6 +1888,7 @@ describe("cli", () => {
         agentArgsOverride: {},
         effort: "medium",
         maxConsecutiveFailures: 3,
+        observerEvery: 5,
         preventSleep: true,
       },
       {
@@ -1887,6 +1925,7 @@ describe("cli", () => {
           agentArgsOverride: {},
           effort: "medium",
           maxConsecutiveFailures: 3,
+          observerEvery: 5,
           preventSleep: true,
         },
         {
@@ -1928,6 +1967,7 @@ describe("cli", () => {
         agentArgsOverride: {},
         effort: "medium",
         maxConsecutiveFailures: 3,
+        observerEvery: 5,
         preventSleep: true,
       },
       {
@@ -1971,6 +2011,7 @@ describe("cli", () => {
           agentArgsOverride: {},
           effort: "medium",
           maxConsecutiveFailures: 3,
+          observerEvery: 5,
           preventSleep: true,
         },
         {
@@ -2008,6 +2049,7 @@ describe("cli", () => {
           agentArgsOverride: {},
           effort: "medium",
           maxConsecutiveFailures: 3,
+          observerEvery: 5,
           preventSleep: true,
         },
         {
@@ -2040,6 +2082,7 @@ describe("cli", () => {
       agentArgsOverride: {},
       effort: "medium",
       maxConsecutiveFailures: 3,
+      observerEvery: 5,
       preventSleep: true,
     }));
     const startSleepPrevention = vi.fn(() =>
@@ -2210,6 +2253,7 @@ describe("cli", () => {
         agentArgsOverride: {},
         effort: "medium",
         maxConsecutiveFailures: 3,
+        observerEvery: 5,
         preventSleep: true,
       })),
     }));
@@ -2349,6 +2393,7 @@ describe("cli", () => {
         agentArgsOverride: {},
         effort: "medium",
         maxConsecutiveFailures: 3,
+        observerEvery: 5,
         preventSleep: true,
       })),
     }));
@@ -2484,6 +2529,7 @@ describe("cli", () => {
         agentArgsOverride: {},
         effort: "medium",
         maxConsecutiveFailures: 3,
+        observerEvery: 5,
         preventSleep: true,
       })),
     }));
@@ -2614,6 +2660,7 @@ describe("cli", () => {
         agentArgsOverride: {},
         effort: "medium",
         maxConsecutiveFailures: 3,
+        observerEvery: 5,
         preventSleep: true,
       })),
     }));
@@ -2741,6 +2788,7 @@ describe("cli", () => {
         agentArgsOverride: {},
         effort: "medium",
         maxConsecutiveFailures: 3,
+        observerEvery: 5,
         preventSleep: true,
       })),
     }));
@@ -2863,6 +2911,7 @@ describe("cli", () => {
         agentArgsOverride: {},
         effort: "medium",
         maxConsecutiveFailures: 3,
+        observerEvery: 5,
         preventSleep: false,
       })),
     }));
@@ -3026,6 +3075,7 @@ describe("cli", () => {
         agentArgsOverride: {},
         effort: "medium",
         maxConsecutiveFailures: 3,
+        observerEvery: 5,
         preventSleep: false,
       })),
     }));
@@ -3146,6 +3196,7 @@ describe("cli", () => {
         agentArgsOverride: {},
         effort: "medium",
         maxConsecutiveFailures: 3,
+        observerEvery: 5,
         preventSleep: false,
       },
       { orchestratorStart, rendererWaitUntilExit },
@@ -3204,6 +3255,7 @@ describe("cli", () => {
         agentArgsOverride: {},
         effort: "medium",
         maxConsecutiveFailures: 3,
+        observerEvery: 5,
         preventSleep: false,
       })),
     }));
@@ -3353,6 +3405,7 @@ describe("cli", () => {
         agentArgsOverride: {},
         effort: "medium",
         maxConsecutiveFailures: 3,
+        observerEvery: 5,
         preventSleep: false,
       })),
     }));
@@ -3461,6 +3514,7 @@ describe("cli", () => {
         agentArgsOverride: {},
         effort: "medium",
         maxConsecutiveFailures: 3,
+        observerEvery: 5,
         preventSleep: false,
       },
       {
@@ -3529,6 +3583,7 @@ describe("cli", () => {
         agentArgsOverride: {},
         effort: "medium",
         maxConsecutiveFailures: 3,
+        observerEvery: 5,
         preventSleep: false,
       })),
     }));
@@ -3684,6 +3739,7 @@ describe("cli", () => {
         agentArgsOverride: {},
         effort: "medium",
         maxConsecutiveFailures: 3,
+        observerEvery: 5,
         preventSleep: false,
       })),
     }));
@@ -3799,6 +3855,7 @@ describe("cli", () => {
         agentArgsOverride: {},
         effort: "medium",
         maxConsecutiveFailures: 3,
+        observerEvery: 5,
         preventSleep: false,
       },
       { createBranch },
@@ -3825,6 +3882,7 @@ describe("cli", () => {
         agentArgsOverride: {},
         effort: "medium",
         maxConsecutiveFailures: 3,
+        observerEvery: 5,
         preventSleep: false,
       },
       { createWorktree },
@@ -3851,6 +3909,7 @@ describe("cli", () => {
         agentArgsOverride: {},
         effort: "medium",
         maxConsecutiveFailures: 3,
+        observerEvery: 5,
         preventSleep: true,
       },
       { createWorktree, startSleepPrevention },
@@ -3874,6 +3933,7 @@ describe("cli", () => {
         agentArgsOverride: {},
         effort: "medium",
         maxConsecutiveFailures: 3,
+        observerEvery: 5,
         preventSleep: false,
       },
       { listWorktreePaths },
@@ -3893,6 +3953,7 @@ describe("cli", () => {
         agentArgsOverride: {},
         effort: "medium",
         maxConsecutiveFailures: 3,
+        observerEvery: 5,
         preventSleep: false,
       },
       {
@@ -3942,6 +4003,7 @@ describe("cli", () => {
           agentArgsOverride: {},
           effort: "medium",
           maxConsecutiveFailures: 3,
+          observerEvery: 5,
           preventSleep: false,
         },
         {
@@ -4040,6 +4102,7 @@ describe("cli", () => {
           agentArgsOverride: {},
           effort: "medium",
           maxConsecutiveFailures: 3,
+          observerEvery: 5,
           preventSleep: false,
         },
         {
@@ -4096,6 +4159,7 @@ describe("cli", () => {
           agentArgsOverride: {},
           effort: "medium",
           maxConsecutiveFailures: 3,
+          observerEvery: 5,
           preventSleep: false,
         },
         {
@@ -4157,6 +4221,7 @@ describe("cli", () => {
           agentArgsOverride: {},
           effort: "medium",
           maxConsecutiveFailures: 3,
+          observerEvery: 5,
           preventSleep: false,
         },
         {
@@ -4216,6 +4281,7 @@ describe("cli", () => {
           agentArgsOverride: {},
           effort: "medium",
           maxConsecutiveFailures: 3,
+          observerEvery: 5,
           preventSleep: false,
         },
         {
@@ -4278,6 +4344,7 @@ describe("cli", () => {
           agentArgsOverride: {},
           effort: "medium",
           maxConsecutiveFailures: 3,
+          observerEvery: 5,
           preventSleep: false,
         },
         {
@@ -4334,6 +4401,7 @@ describe("cli", () => {
           agentArgsOverride: {},
           effort: "medium",
           maxConsecutiveFailures: 3,
+          observerEvery: 5,
           preventSleep: false,
           commitMessage: CONVENTIONAL_COMMIT_MESSAGE,
         },

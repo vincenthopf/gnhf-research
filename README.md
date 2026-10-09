@@ -220,11 +220,28 @@ The prompt gives the agent the ledger's absolute path and the record format. Eac
 - `iteration`: integer
 - `evidence_origin`: `executed`, `source_read`, `reasoning_only`, or `none`
 - `claim`: non-empty string
-- optional `boundary` (string), `reframes` (the `id` of an earlier record), `sources`, `next`, and any other fields
+- optional `boundary` (string), `reframes` (the `id` of an earlier record), `type`, `sources`, `next`, and any other fields
+
+A record with `"type": "contract"` registers a next study. The contract stays open until its `id` appears in an iteration's `contracts_run` or a later record names it in `reframes`.
 
 The ledger is append only. To revise a record, the agent appends a new record whose `reframes` names it. gnhf keeps the last validated content in `.gnhf/runs/<runId>/ledger/validated.jsonl`. After each iteration that returns output or ends in an agent error, gnhf checks the ledger against that content: every non-empty line must parse as an object with the required fields, ids must be unique, and earlier lines must be unchanged. If the check fails, gnhf saves the agent's ledger to `.gnhf/runs/<runId>/ledger/rejected-iteration-<n>.jsonl` (never overwriting an earlier file), restores the validated content, fails the iteration (its code changes roll back as for any reported failure, and its `should_fully_stop` is ignored), and tells the next iteration the reason, for example `ledger validation failed: line 2 changed (id r1)`.
 
 Iterations that end without a result (aborted, stopped, rate-limited or killed) are not checked when they end. When the run ends and before each iteration, gnhf compares the ledger with the validated copy: valid appends are accepted and lines removed by a git rollback are restored. Any other change is handled before the next iteration, which may be in a resumed run: gnhf saves it to `rejected-before-iteration-<n>.jsonl`, restores the validated content and reports the reason in that iteration's prompt. Valid records from an iteration that reports failure are kept, also in a ledger tracked by git, where they stay uncommitted until the next successful iteration.
+
+#### Research stats, stall signal and observer pass
+
+Research runs show a second stats row in the TUI and a `research` line in the exit summary, for example `exec 3 · reason 1 · goals stale 2 · open contracts 4 · no boundary 1` (the TUI shortens the labels to `stale` and `contracts` when the row does not fit):
+
+- `exec` and `reason`: iterations that returned output with `evidence_origin` `executed` or `reasoning_only`
+- `goals stale`: the most recent iterations in a row with an empty `goals_changed`
+- `open contracts`: contract records that are still open
+- `no boundary`: ledger records without a non-empty `boundary`
+
+gnhf rebuilds the per-iteration counts from the `iteration:end` events in `gnhf.log` and the ledger counts from `validated.jsonl`, so the stats survive a resume.
+
+The stall signal fires after 3 research iterations in a row with an empty `goals_changed`, or 3 in a row with `evidence_origin` `reasoning_only`, and again after every further 3 of the same streak. The next prompt then gets a `## Change Approach` section naming the signal and asking the agent to run an executed study or an observer pass instead of stopping. The signal never stops the run. gnhf logs it as a `research:stall` debug-log event.
+
+Every `observerEvery`-th iteration (config key, default `5`, `0` disables) and the iteration right after the stall signal fires, the prompt gets an `## Observer Pass` section. It asks the agent to run the six `observer-*` subagents (account-evidence, variation-invariance, means-inspectability, cross-context, purpose-contribution, frontier-exposure) in parallel over the ledger and the run's artifacts, and to append their output as ledger records with `evidence_origin` `none` or `reasoning_only` and an `observer` field. Observer records are leads, not evidence. The subagents must be defined for claude, for example through the `agents` config key. A final or wrap-up iteration gets neither section.
 
 ## CLI Reference
 
@@ -301,9 +318,14 @@ effort: medium
 # Abort after this many consecutive failures
 maxConsecutiveFailures: 3
 
+# Research runs: run the six observer subagents every n iterations (0 disables)
+observerEvery: 5
+
 # Prevent the machine from sleeping during a run
 preventSleep: true
 ```
+
+`observerEvery` must be a whole number of 0 or more. It only affects `--workflow research` runs.
 
 CLI flags override config file values. `--prevent-sleep` accepts `on`/`off` as well as `true`/`false`; the config file always uses a boolean.
 The iteration, token, and rate-limit-wait caps are runtime-only flags and are not persisted in `config.yml`; `--stop-when`, `--workflow` and `--ledger` are persisted per run for resume, but not in config.

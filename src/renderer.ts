@@ -13,6 +13,10 @@ import { formatTokens, getTotalTokenCount } from "./utils/tokens.js";
 import { wordWrap } from "./utils/wordwrap.js";
 import type { Orchestrator, OrchestratorState } from "./core/orchestrator.js";
 import {
+  researchStatsSegments,
+  type ResearchStats,
+} from "./core/research-stats.js";
+import {
   type Cell,
   type Style,
   textToCells,
@@ -191,6 +195,21 @@ export function renderStatsCells(
   const separator = [...padding, ...textToCells("\u00b7", "dim"), ...padding];
   return segments.flatMap((segment, index) =>
     index === 0 ? segment : [...separator, ...segment],
+  );
+}
+
+export function renderResearchStatsCells(stats: ResearchStats): Cell[] {
+  const full = researchStatsSegments(stats, false);
+  const fullWidth = full.join(" · ").length;
+  const segments =
+    fullWidth <= CONTENT_WIDTH ? full : researchStatsSegments(stats, true);
+  const padded = segments.join(" · ").length <= CONTENT_WIDTH;
+  const padding = padded ? textToCells(" ", "normal") : [];
+  const separator = [...padding, ...textToCells("\u00b7", "dim"), ...padding];
+  return segments.flatMap((segment, index) =>
+    index === 0
+      ? textToCells(segment, "normal")
+      : [...separator, ...textToCells(segment, "normal")],
   );
 }
 
@@ -550,6 +569,10 @@ export function buildContentCells(
         state.maxIterations,
       ),
     ] as Cell[][],
+    research:
+      state.research === undefined
+        ? ([] as Cell[][])
+        : [renderResearchStatsCells(state.research)],
     agent: [
       [],
       [],
@@ -568,6 +591,7 @@ export function buildContentCells(
     ...sections.art,
     ...sections.prompt,
     ...sections.stats,
+    ...sections.research,
     ...sections.agent,
     ...sections.moon,
   ];
@@ -577,6 +601,7 @@ export function buildContentCells(
     "eyebrow",
     "agent",
     "prompt",
+    "research",
   ];
 
   let rows = flattenSections();
@@ -597,6 +622,7 @@ export function buildContentCells(
       ...sections.art,
       ...sections.prompt,
       ...sections.stats,
+      ...sections.research,
       ...sections.agent,
     ].filter((row) => row.length > 0);
     const allowedMoonRows = Math.max(0, maxRows - nonMoonRows.length);

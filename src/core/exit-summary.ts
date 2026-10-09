@@ -1,6 +1,7 @@
 import type { OrchestratorState } from "./orchestrator.js";
 import type { BranchDiffStats } from "./git.js";
 import { formatTokens, getTotalTokenCount } from "../utils/tokens.js";
+import { formatResearchStats, type ResearchStats } from "./research-stats.js";
 
 type RunStatus = OrchestratorState["status"];
 
@@ -34,6 +35,7 @@ export interface ExitSummaryOptions {
   terminalColumns?: number;
   hasPendingCommitFailure?: boolean;
   sleepPreventionNotice?: SleepPreventionNotice;
+  research?: ResearchStats;
 }
 
 const MIN_CARD_WIDTH = 62;
@@ -256,6 +258,11 @@ export function renderExitSummary(options: ExitSummaryOptions): string {
       `${options.diffStats.filesUpdated} updated`,
       `${options.diffStats.filesDeleted} deleted`,
     ]),
+    ...(options.research === undefined
+      ? []
+      : [
+          commandLine(s.dim("research"), formatResearchStats(options.research)),
+        ]),
     "",
     commandLine(s.dim("notes"), options.notesPath),
     commandLine(s.dim("debug log"), options.logPath),

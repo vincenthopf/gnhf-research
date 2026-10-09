@@ -59,6 +59,7 @@ describe("loadConfig", () => {
       agentArgsOverride: {},
       effort: "medium",
       maxConsecutiveFailures: 3,
+      observerEvery: 5,
       preventSleep: true,
     });
     expect(config).not.toHaveProperty("commitMessage");
@@ -82,6 +83,7 @@ describe("loadConfig", () => {
       agentArgsOverride: {},
       effort: "medium",
       maxConsecutiveFailures: 3,
+      observerEvery: 5,
       preventSleep: true,
     });
   });
@@ -114,6 +116,7 @@ describe("loadConfig", () => {
       agentArgsOverride: {},
       effort: "medium",
       maxConsecutiveFailures: 3,
+      observerEvery: 5,
       preventSleep: true,
     });
   });
@@ -126,6 +129,29 @@ describe("loadConfig", () => {
     expect(mockReadFileSync).toHaveBeenCalledWith(CONFIG_PATH, "utf-8");
     expect(config.maxConsecutiveFailures).toBe(7);
   });
+
+  it("defaults observerEvery to 5", () => {
+    mockReadFileSync.mockReturnValue("maxConsecutiveFailures: 7\n");
+
+    expect(loadConfig().observerEvery).toBe(5);
+  });
+
+  it.each([0, 1, 12])("reads observerEvery: %s", (value) => {
+    mockReadFileSync.mockReturnValue(`observerEvery: ${value}\n`);
+
+    expect(loadConfig().observerEvery).toBe(value);
+  });
+
+  it.each(["-1", "1.5", "five", "true"])(
+    "rejects observerEvery: %s at load",
+    (value) => {
+      mockReadFileSync.mockReturnValue(`observerEvery: ${value}\n`);
+
+      expect(() => loadConfig()).toThrow(
+        "Invalid config value for observerEvery",
+      );
+    },
+  );
 
   it("accepts a legacy agent: claude key", () => {
     mockReadFileSync.mockReturnValue(
@@ -187,6 +213,7 @@ describe("loadConfig", () => {
       agentArgsOverride: {},
       effort: "medium",
       maxConsecutiveFailures: 10,
+      observerEvery: 5,
       preventSleep: true,
     });
   });
@@ -202,6 +229,7 @@ describe("loadConfig", () => {
       agentArgsOverride: {},
       effort: "medium",
       maxConsecutiveFailures: 3,
+      observerEvery: 5,
       preventSleep: false,
     });
   });
@@ -217,6 +245,7 @@ describe("loadConfig", () => {
       agentArgsOverride: {},
       effort: "medium",
       maxConsecutiveFailures: 3,
+      observerEvery: 5,
       preventSleep: false,
     });
   });
@@ -232,6 +261,7 @@ describe("loadConfig", () => {
       agentArgsOverride: {},
       effort: "medium",
       maxConsecutiveFailures: 3,
+      observerEvery: 5,
       preventSleep: true,
     });
     expect(config).toEqual({
@@ -240,6 +270,7 @@ describe("loadConfig", () => {
       agentArgsOverride: {},
       effort: "medium",
       maxConsecutiveFailures: 3,
+      observerEvery: 5,
       preventSleep: true,
     });
   });
@@ -300,6 +331,7 @@ describe("loadConfig", () => {
       agentArgsOverride: {},
       effort: "medium",
       maxConsecutiveFailures: 3,
+      observerEvery: 5,
       preventSleep: true,
     });
   });
@@ -316,6 +348,7 @@ describe("loadConfig", () => {
       agentArgsOverride: {},
       effort: "medium",
       maxConsecutiveFailures: 3,
+      observerEvery: 5,
       preventSleep: true,
     });
   });

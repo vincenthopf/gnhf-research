@@ -33,5 +33,8 @@ effort: medium
 # Abort after this many consecutive failures
 maxConsecutiveFailures: 3
 
+# Research runs: run the six observer subagents every n iterations (0 disables)
+observerEvery: 5
+
 # Prevent the machine from sleeping during a run
 preventSleep: true

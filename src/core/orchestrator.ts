@@ -38,6 +38,14 @@ import {
   validatedLedgerPath,
   writeRejectedLedger,
 } from "./ledger.js";
+import {
+  computeResearchStats,
+  readResearchHistory,
+  stallReports,
+  type ResearchHistoryEntry,
+  type ResearchStats,
+  type StallReport,
+} from "./research-stats.js";
 import { buildIterationPrompt } from "../templates/iteration-prompt.js";
 import { getTotalTokenCount } from "../utils/tokens.js";
 import type { ResearchEvidence } from "./workflow.js";
@@ -83,6 +91,7 @@ export interface OrchestratorState {
   lastMessage: string | null;
   lastAgentError?: string | null;
   hasPendingCommitFailure?: boolean;
+  research?: ResearchStats;
 }
 
 export interface OrchestratorEvents {
@@ -168,6 +177,8 @@ export class Orchestrator extends EventEmitter<OrchestratorEvents> {
   private pendingLedgerRejection: LedgerRejection | null = null;
   private ledgerBaseline: string | undefined = undefined;
   private wrapUpStopReason: string | null = null;
+  private researchHistory: ResearchHistoryEntry[] = [];
+  private validatedLedger = "";
   private noProgressStreak = 0;
   private activeIterationTokensEstimated = false;
   private activeIterationOverage: UsageOverage | null = null;
@@ -232,6 +243,13 @@ export class Orchestrator extends EventEmitter<OrchestratorEvents> {
       this.runInfo.baseCommit,
       this.cwd,
     );
+    if (this.runInfo.workflow === "research") {
+      this.researchHistory = readResearchHistory(this.runInfo.logPath);
+      this.validatedLedger = readLedger(
+        validatedLedgerPath(this.runInfo.runDir),
+      );
+      this.refreshResearchStats();
+    }
   }
 
   getState(): OrchestratorState {
@@ -363,6 +381,8 @@ export class Orchestrator extends EventEmitter<OrchestratorEvents> {
         this.ledgerBaseline = this.reconcileLedger(true);
         const finalIteration = this.getFinalIteration();
         this.wrapUpStopReason = finalIteration?.stopReason ?? null;
+        const guidance =
+          finalIteration === undefined ? this.researchGuidance() : {};
         const baseIterationPrompt = buildIterationPrompt({
           n: this.state.currentIteration,
           runId: this.runInfo.runId,
@@ -373,6 +393,7 @@ export class Orchestrator extends EventEmitter<OrchestratorEvents> {
           ...(this.runInfo.ledgerPath === undefined
             ? {}
             : { ledgerPath: this.runInfo.ledgerPath }),
+          ...guidance,
           ...(this.limits.until === undefined
             ? {}
             : { deadline: formatDeadline(this.limits.until) }),
@@ -468,6 +489,13 @@ export class Orchestrator extends EventEmitter<OrchestratorEvents> {
         this.consecutiveRateLimitWaits = 0;
         const { record } = result;
         this.state.iterations.push(record);
+        if (record.evidence !== undefined) {
+          this.researchHistory.push({
+            iteration: record.number,
+            ...record.evidence,
+          });
+          this.refreshResearchStats();
+        }
         this.state.completedIterations =
           (this.state.completedIterations ?? 0) + 1;
         this.emit("iteration:end", record);
@@ -487,6 +515,9 @@ export class Orchestrator extends EventEmitter<OrchestratorEvents> {
           tokensEstimated: this.state.tokensEstimated,
           commitCount: this.state.commitCount,
         });
+        if (record.evidence !== undefined) {
+          this.logResearchStall(record.number);
+        }
 
         if (result.abortReason) {
           this.abort(result.abortReason);
@@ -1045,6 +1076,58 @@ The rejected ledger is saved at ${rejection.rejectedPath}. Earlier lines must st
 
   private writeValidatedLedger(content: string): void {
     this.writeLedgerFile(validatedLedgerPath(this.runInfo.runDir), content);
+    if (content !== this.validatedLedger) {
+      this.validatedLedger = content;
+      this.refreshResearchStats();
+    }
+  }
+
+  private refreshResearchStats(): void {
+    if (this.runInfo.workflow !== "research") return;
+    this.state.research = computeResearchStats(
+      this.researchHistory,
+      this.validatedLedger,
+    );
+  }
+
+  private currentStall(): StallReport[] {
+    const stats = this.state.research;
+    return stats === undefined ? [] : stallReports(stats);
+  }
+
+  private logResearchStall(iteration: number): void {
+    const stall = this.currentStall();
+    if (stall.length === 0) return;
+    appendDebugLog("research:stall", {
+      iteration,
+      signals: stall.map((report) => report.signal),
+      goalsStale: this.state.research?.goalsStale,
+      reasoningStreak: this.state.research?.reasoningStreak,
+    });
+  }
+
+  private researchGuidance(): { stall?: StallReport[]; observerPass?: string } {
+    if (this.runInfo.workflow !== "research") return {};
+    const iteration = this.state.currentIteration;
+    const stall = this.currentStall();
+    const every = this.config.observerEvery;
+    const reasons = [
+      ...(stall.length > 0
+        ? [
+            `the stall signal fired after iteration ${this.researchHistory.at(-1)!.iteration}`,
+          ]
+        : []),
+      ...(every > 0 && iteration % every === 0
+        ? [`iteration ${iteration} is a multiple of observerEvery (${every})`]
+        : []),
+    ];
+    if (reasons.length > 0) {
+      appendDebugLog("research:observer", { iteration, reasons });
+    }
+    return {
+      ...(stall.length > 0 ? { stall } : {}),
+      ...(reasons.length > 0 ? { observerPass: reasons.join(" and ") } : {}),
+    };
   }
 
   private writeLedgerFile(path: string, content: string): void {

@@ -352,4 +352,118 @@ describe("buildIterationPrompt workflow", () => {
       buildIterationPrompt({ ...base, ledgerPath: "/l.jsonl" }),
     ).not.toContain("## Research Ledger");
   });
+
+  it("documents contract records in the research workflow section", () => {
+    const result = buildIterationPrompt({ ...base, workflow: "research" });
+    const section = result.slice(
+      result.indexOf("## Research Workflow"),
+      result.indexOf("## Objective"),
+    );
+    expect(section).toContain('"type": "contract"');
+    expect(section).toContain(
+      "A contract stays open until its id appears in contracts_run or a later record reframes it",
+    );
+  });
+
+  it("asks for a change of approach naming the stall signals that fired", () => {
+    const result = buildIterationPrompt({
+      ...base,
+      workflow: "research",
+      stall: [
+        { signal: "goals", iterations: 3 },
+        { signal: "reasoning", iterations: 3 },
+      ],
+    });
+    const section = result.slice(
+      result.indexOf("## Change Approach"),
+      result.indexOf("## Objective"),
+    );
+    expect(result).toContain("## Change Approach");
+    expect(section).toContain(
+      "- the last 3 research iterations changed no goal (goals_changed was empty)",
+    );
+    expect(section).toContain(
+      "- the last 3 research iterations were reasoning_only",
+    );
+    expect(section).toContain(
+      "Change approach in this iteration: run an executed study or an observer pass.",
+    );
+    expect(section).toContain("Do not stop the run");
+  });
+
+  it("names only the goals signal when only it fired", () => {
+    const result = buildIterationPrompt({
+      ...base,
+      workflow: "research",
+      stall: [{ signal: "goals", iterations: 6 }],
+    });
+    expect(result).toContain(
+      "- the last 6 research iterations changed no goal",
+    );
+    expect(result).not.toContain("were reasoning_only");
+  });
+
+  it("asks for an observer pass with the six observer subagents", () => {
+    const result = buildIterationPrompt({
+      ...base,
+      workflow: "research",
+      ledgerPath: "/l.jsonl",
+      observerPass: "this is iteration 5 and observerEvery is 5",
+    });
+    const section = result.slice(
+      result.indexOf("## Observer Pass"),
+      result.indexOf("## Objective"),
+    );
+    expect(section).toContain(
+      "This iteration includes an observer pass: this is iteration 5 and observerEvery is 5.",
+    );
+    for (const name of [
+      "observer-account-evidence",
+      "observer-variation-invariance",
+      "observer-means-inspectability",
+      "observer-cross-context",
+      "observer-purpose-contribution",
+      "observer-frontier-exposure",
+    ]) {
+      expect(section).toContain(name);
+    }
+    expect(section).toContain("in parallel");
+    expect(section).toContain('evidence_origin "none" or "reasoning_only"');
+    expect(section).toContain('"observer"');
+    expect(section).toContain("leads, not evidence");
+  });
+
+  it("places the change approach and observer sections before stop condition, deadline and final iteration", () => {
+    const result = buildIterationPrompt({
+      ...base,
+      workflow: "research",
+      ledgerPath: "/l.jsonl",
+      stall: [{ signal: "reasoning", iterations: 3 }],
+      observerPass: "the stall signal fired after iteration 3",
+      stopWhen: "done",
+      deadline: "17:30",
+      finalIteration: { reason: "cap", wrapUpOnly: false },
+    });
+    const ledger = result.indexOf("## Research Ledger");
+    const change = result.indexOf("## Change Approach");
+    const observer = result.indexOf("## Observer Pass");
+    expect(change).toBeGreaterThan(ledger);
+    expect(observer).toBeGreaterThan(change);
+    expect(observer).toBeLessThan(result.indexOf("## Stop Condition"));
+    expect(observer).toBeLessThan(result.indexOf("## Deadline"));
+    expect(observer).toBeLessThan(result.indexOf("## Final Iteration"));
+  });
+
+  it("omits the change approach and observer sections outside research mode or when not asked", () => {
+    expect(
+      buildIterationPrompt({
+        ...base,
+        stall: [{ signal: "goals", iterations: 3 }],
+        observerPass: "scheduled",
+      }),
+    ).toBe(buildIterationPrompt(base));
+    const research = buildIterationPrompt({ ...base, workflow: "research" });
+    expect(research).not.toContain("## Change Approach");
+    expect(research).not.toContain("## Observer Pass");
+  });
 });
