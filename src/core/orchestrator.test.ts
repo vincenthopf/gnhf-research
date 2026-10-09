@@ -3880,6 +3880,9 @@ describe("Orchestrator research stats and stall signal", () => {
     goals?: string[];
     contracts?: string[];
     records?: Record<string, unknown>[];
+    success?: boolean;
+    rewriteLedger?: string;
+    rateLimited?: boolean;
   };
 
   function evidenceAgent(steps: Step[]): Agent {
@@ -3889,6 +3892,13 @@ describe("Orchestrator research stats and stall signal", () => {
       run: vi.fn(async () => {
         const step = steps[Math.min(call, steps.length - 1)]!;
         call++;
+        if (step.rateLimited === true) {
+          throw new RateLimitAgentError(
+            "claude usage limit reached",
+            "claude exited with code 1: usage limit",
+            null,
+          );
+        }
         for (const record of step.records ?? []) {
           writeFileSync(
             statsInfo.ledgerPath!,
@@ -3896,9 +3906,12 @@ describe("Orchestrator research stats and stall signal", () => {
             "utf-8",
           );
         }
+        if (step.rewriteLedger !== undefined) {
+          writeFileSync(statsInfo.ledgerPath!, step.rewriteLedger, "utf-8");
+        }
         return {
           output: {
-            success: true,
+            success: step.success ?? true,
             summary: "studied",
             key_changes_made: ["x"],
             key_learnings: [],
@@ -3975,8 +3988,138 @@ describe("Orchestrator research stats and stall signal", () => {
       goalsStale: 2,
       reasoningStreak: 0,
       openContracts: 1,
-      missingBoundary: 2,
+      missingBoundary: 1,
     });
+  });
+
+  it("does not close contracts or reset goals stale from failed or ledger-rejected iterations", async () => {
+    const contract = {
+      id: "c1",
+      iteration: 1,
+      evidence_origin: "none",
+      claim: "run c1",
+      type: "contract",
+      boundary: "b",
+    };
+    const orchestrator = run(
+      evidenceAgent([
+        { origin: "executed", goals: [], records: [contract] },
+        {
+          origin: "executed",
+          goals: ["G1"],
+          contracts: ["c1"],
+          rewriteLedger: `${JSON.stringify({ ...contract, claim: "edited" })}\n`,
+        },
+        {
+          origin: "executed",
+          goals: ["G1"],
+          contracts: ["c1"],
+          success: false,
+        },
+      ]),
+      3,
+    );
+
+    await orchestrator.start();
+
+    expect(orchestrator.getState().iterations.map((i) => i.success)).toEqual([
+      true,
+      false,
+      false,
+    ]);
+    expect(orchestrator.getState().iterations[1]!.summary).toMatch(
+      /^ledger validation failed/,
+    );
+    expect(orchestrator.getState().research).toMatchObject({
+      executed: 3,
+      goalsStale: 3,
+      openContracts: 1,
+    });
+  });
+
+  it("logs success in iteration:end so a resume ignores failed iterations", async () => {
+    const orchestrator = run(
+      evidenceAgent([
+        {
+          origin: "executed",
+          goals: ["G1"],
+          contracts: ["c1"],
+          success: false,
+        },
+      ]),
+      1,
+    );
+
+    await orchestrator.start();
+
+    expect(mockAppendDebugLog).toHaveBeenCalledWith(
+      "iteration:end",
+      expect.objectContaining({
+        iteration: 1,
+        success: false,
+        contractsRun: ["c1"],
+      }),
+    );
+  });
+
+  it("refreshes ledger stats from the pre-iteration ledger check", async () => {
+    let openContractsDuringRun: number | undefined;
+    const agent = evidenceAgent([{ origin: "executed" }]);
+    const runAgent = agent.run;
+    agent.run = vi.fn(async (...args: Parameters<Agent["run"]>) => {
+      openContractsDuringRun = orchestrator.getState().research?.openContracts;
+      return runAgent(...args);
+    });
+    const orchestrator = run(agent, 1);
+    writeFileSync(
+      statsInfo.ledgerPath!,
+      `${JSON.stringify({ id: "c1", iteration: 0, evidence_origin: "none", claim: "next", type: "contract", boundary: "b" })}\n`,
+      "utf-8",
+    );
+
+    expect(orchestrator.getState().research?.openContracts).toBe(0);
+
+    await orchestrator.start();
+
+    expect(openContractsDuringRun).toBe(1);
+  });
+
+  it("logs research:observer once per iteration, also across rate-limit retries", async () => {
+    const orchestrator = new Orchestrator(
+      { ...config, observerEvery: 2 },
+      evidenceAgent([
+        { origin: "executed" },
+        { origin: "executed", rateLimited: true },
+        { origin: "executed" },
+      ]),
+      statsInfo,
+      "study it",
+      dir,
+      0,
+      { maxIterations: 3, fallbackModel: "claude-haiku" },
+    );
+
+    await orchestrator.start();
+
+    expect(promptParams().map((p) => p.observerPass)).toEqual([
+      undefined,
+      "iteration 2 is a multiple of observerEvery (2)",
+      "iteration 2 is a multiple of observerEvery (2)",
+      undefined,
+    ]);
+    expect(
+      mockAppendDebugLog.mock.calls.filter(
+        ([event]) => event === "research:observer",
+      ),
+    ).toEqual([
+      [
+        "research:observer",
+        {
+          iteration: 2,
+          reasons: ["iteration 2 is a multiple of observerEvery (2)"],
+        },
+      ],
+    ]);
   });
 
   it("leaves research stats out of the default workflow state", async () => {
@@ -4110,6 +4253,7 @@ describe("Orchestrator research stats and stall signal", () => {
           JSON.stringify({
             event: "iteration:end",
             iteration,
+            success: true,
             evidenceOrigin: "reasoning_only",
             goalsChanged: ["G1"],
             contractsRun: [],
@@ -4138,7 +4282,7 @@ describe("Orchestrator research stats and stall signal", () => {
       reasoningOnly: 3,
       reasoningStreak: 3,
       openContracts: 1,
-      missingBoundary: 1,
+      missingBoundary: 0,
     });
 
     await orchestrator.start();

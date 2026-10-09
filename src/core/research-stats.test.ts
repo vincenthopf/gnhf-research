@@ -16,8 +16,9 @@ function evidence(
   evidenceOrigin: string,
   goalsChanged: string[] = [],
   contractsRun: string[] = [],
-): ResearchEvidence {
-  return { evidenceOrigin, goalsChanged, contractsRun, boundary: "" };
+  success = true,
+): ResearchEvidence & { success: boolean } {
+  return { evidenceOrigin, goalsChanged, contractsRun, boundary: "", success };
 }
 
 function ledger(...records: Record<string, unknown>[]): string {
@@ -100,6 +101,53 @@ describe("computeResearchStats", () => {
       ),
     );
     expect(stats.openContracts).toBe(2);
+  });
+
+  it("does not close contracts named by a failed iteration", () => {
+    const stats = computeResearchStats(
+      [evidence("executed", ["G1"], ["c1"], false)],
+      ledger({ id: "c1", type: "contract", claim: "run c1", boundary: "b" }),
+    );
+    expect(stats.openContracts).toBe(1);
+  });
+
+  it("does not reset the goals stale streak on a failed iteration", () => {
+    const stats = computeResearchStats(
+      [
+        evidence("executed", []),
+        evidence("executed", ["G1"], [], false),
+        evidence("executed", []),
+      ],
+      "",
+    );
+    expect(stats.goalsStale).toBe(3);
+  });
+
+  it("still counts the evidence origin of a failed iteration", () => {
+    const stats = computeResearchStats(
+      [
+        evidence("reasoning_only", ["G1"], [], false),
+        evidence("reasoning_only", ["G1"]),
+      ],
+      "",
+    );
+    expect(stats.reasoningOnly).toBe(2);
+    expect(stats.reasoningStreak).toBe(2);
+  });
+
+  it("excludes reframed, contract and observer records from no boundary", () => {
+    const stats = computeResearchStats(
+      [],
+      ledger(
+        { id: "r1", claim: "a" },
+        { id: "r2", claim: "b" },
+        { id: "r3", claim: "b revised", reframes: "r2", boundary: "b" },
+        { id: "c1", type: "contract", claim: "run c1" },
+        { id: "o1", claim: "lead", observer: "observer-cross-context" },
+        { id: "r4", claim: "c", reframes: "r1" },
+      ),
+    );
+    expect(stats.missingBoundary).toBe(1);
   });
 
   it("counts records without a non-empty string boundary", () => {
@@ -209,6 +257,7 @@ describe("readResearchHistory", () => {
         JSON.stringify({
           event: "iteration:end",
           iteration: 1,
+          success: true,
           evidenceOrigin: "executed",
           goalsChanged: ["G1"],
           contractsRun: ["c1"],
@@ -219,6 +268,7 @@ describe("readResearchHistory", () => {
         JSON.stringify({
           event: "iteration:end",
           iteration: 3,
+          success: false,
           evidenceOrigin: "reasoning_only",
           goalsChanged: "G2",
           contractsRun: [1, "c2"],
@@ -231,6 +281,7 @@ describe("readResearchHistory", () => {
     expect(readResearchHistory(logPath)).toEqual([
       {
         iteration: 1,
+        success: true,
         evidenceOrigin: "executed",
         goalsChanged: ["G1"],
         contractsRun: ["c1"],
@@ -238,6 +289,7 @@ describe("readResearchHistory", () => {
       },
       {
         iteration: 3,
+        success: false,
         evidenceOrigin: "reasoning_only",
         goalsChanged: [],
         contractsRun: ["c2"],

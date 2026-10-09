@@ -12,7 +12,11 @@ export interface ResearchStats {
   missingBoundary: number;
 }
 
-export interface ResearchHistoryEntry extends ResearchEvidence {
+export interface ResearchOutcome extends ResearchEvidence {
+  success: boolean;
+}
+
+export interface ResearchHistoryEntry extends ResearchOutcome {
   iteration: number;
 }
 
@@ -61,6 +65,7 @@ export function readResearchHistory(logPath: string): ResearchHistoryEntry[] {
     byIteration.delete(iteration);
     byIteration.set(iteration, {
       iteration,
+      success: event.success === true,
       evidenceOrigin: event.evidenceOrigin,
       goalsChanged: strings(event.goalsChanged),
       contractsRun: strings(event.contractsRun),
@@ -71,8 +76,8 @@ export function readResearchHistory(logPath: string): ResearchHistoryEntry[] {
 }
 
 function trailingCount(
-  history: ResearchEvidence[],
-  matches: (entry: ResearchEvidence) => boolean,
+  history: ResearchOutcome[],
+  matches: (entry: ResearchOutcome) => boolean,
 ): number {
   let count = 0;
   for (let i = history.length - 1; i >= 0 && matches(history[i]!); i--) {
@@ -82,7 +87,7 @@ function trailingCount(
 }
 
 export function computeResearchStats(
-  history: ResearchEvidence[],
+  history: ResearchOutcome[],
   ledger: string,
 ): ResearchStats {
   const origins = history.map((entry) => entry.evidenceOrigin);
@@ -92,7 +97,11 @@ export function computeResearchStats(
     .split("\n")
     .map(parseObject)
     .filter((record) => record !== undefined);
-  const contractsRun = new Set(history.flatMap((entry) => entry.contractsRun));
+  const contractsRun = new Set(
+    history
+      .filter((entry) => entry.success)
+      .flatMap((entry) => entry.contractsRun),
+  );
   const reframed = new Set(
     records
       .map((record) => record.reframes)
@@ -105,7 +114,7 @@ export function computeResearchStats(
     noEvidence: count("none"),
     goalsStale: trailingCount(
       history,
-      (entry) => entry.goalsChanged.length === 0,
+      (entry) => !entry.success || entry.goalsChanged.length === 0,
     ),
     reasoningStreak: trailingCount(
       history,
@@ -120,8 +129,11 @@ export function computeResearchStats(
     ).length,
     missingBoundary: records.filter(
       (record) =>
-        typeof record.boundary !== "string" ||
-        record.boundary.trim().length === 0,
+        record.type !== "contract" &&
+        record.observer === undefined &&
+        !(typeof record.id === "string" && reframed.has(record.id)) &&
+        (typeof record.boundary !== "string" ||
+          record.boundary.trim().length === 0),
     ).length,
   };
 }

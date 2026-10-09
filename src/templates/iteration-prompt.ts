@@ -32,7 +32,7 @@ Each iteration continues this cycle. Keep the records in the files the objective
 4. Execute one bounded study: run it with matched controls when possible. If nothing was executed, label the iteration source_read or reasoning_only, whichever is true
 5. Evidence records: each claim states its evidence origin and its boundary, which is what the claim does NOT show
 6. Cross-goal return: state for every goal what changed and what stays open, and list the changed goals in goals_changed
-7. Next contracts: register each next study as a ledger record with "type": "contract" that states what would show it worked, and list the ids of contracts executed this iteration in contracts_run. A contract stays open until its id appears in contracts_run or a later record reframes it
+7. Next contracts: register each next study as a ledger record with "type": "contract" that states what would show it worked, and list the ids of contracts executed this iteration in contracts_run. A contract stays open until its id appears in the contracts_run of a successful iteration or a later record reframes it
 8. Never delete: reframe an earlier record by adding a new record. Never edit or remove earlier records
 
 Repetition is a reason to change approach, not to stop.`;
@@ -49,14 +49,16 @@ Record each claim in the ledger as one JSON object per line. Required fields:
 - evidence_origin: executed, source_read, reasoning_only, or none
 - claim: a non-empty string
 
-Optional fields: boundary (what the claim does NOT show), sources, next, and reframes (the id of an earlier record that this record revises). Other fields are allowed.
+Every claim record needs a non-empty boundary (what the claim does NOT show). Contract records, observer records and records that a later record reframes do not. gnhf counts claim records without a boundary as no boundary in the research stats.
+
+Optional fields: sources, next, and reframes (the id of an earlier record that this record revises). Other fields are allowed.
 
 The ledger is append only. Never edit, reorder or delete an earlier line. To revise a record, append a new record whose reframes field names the earlier id. gnhf checks the ledger before each iteration starts and after each iteration that returns a result. If a line is not a JSON object, a required field is missing or has the wrong type, an id repeats, or an earlier line changed, gnhf saves the rejected ledger to a file, restores the last validated content, fails the iteration that made the change when it returned a result, and states the reason in the next prompt.`;
 }
 
 function describeStall(report: StallReport): string {
   return report.signal === "goals"
-    ? `- the last ${report.iterations} research iterations changed no goal (goals_changed was empty)`
+    ? `- the last ${report.iterations} research iterations changed no goal (each failed or had an empty goals_changed)`
     : `- the last ${report.iterations} research iterations were reasoning_only`;
 }
 

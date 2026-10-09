@@ -178,6 +178,7 @@ export class Orchestrator extends EventEmitter<OrchestratorEvents> {
   private ledgerBaseline: string | undefined = undefined;
   private wrapUpStopReason: string | null = null;
   private researchHistory: ResearchHistoryEntry[] = [];
+  private observerLoggedIteration: number | null = null;
   private validatedLedger = "";
   private noProgressStreak = 0;
   private activeIterationTokensEstimated = false;
@@ -492,6 +493,7 @@ export class Orchestrator extends EventEmitter<OrchestratorEvents> {
         if (record.evidence !== undefined) {
           this.researchHistory.push({
             iteration: record.number,
+            success: record.success,
             ...record.evidence,
           });
           this.refreshResearchStats();
@@ -1121,7 +1123,8 @@ The rejected ledger is saved at ${rejection.rejectedPath}. Earlier lines must st
         ? [`iteration ${iteration} is a multiple of observerEvery (${every})`]
         : []),
     ];
-    if (reasons.length > 0) {
+    if (reasons.length > 0 && this.observerLoggedIteration !== iteration) {
+      this.observerLoggedIteration = iteration;
       appendDebugLog("research:observer", { iteration, reasons });
     }
     return {

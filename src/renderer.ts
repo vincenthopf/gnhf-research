@@ -199,10 +199,7 @@ export function renderStatsCells(
 }
 
 export function renderResearchStatsCells(stats: ResearchStats): Cell[] {
-  const full = researchStatsSegments(stats, false);
-  const fullWidth = full.join(" · ").length;
-  const segments =
-    fullWidth <= CONTENT_WIDTH ? full : researchStatsSegments(stats, true);
+  const segments = researchStatsSegments(stats, true);
   const padded = segments.join(" · ").length <= CONTENT_WIDTH;
   const padding = padded ? textToCells(" ", "normal") : [];
   const separator = [...padding, ...textToCells("\u00b7", "dim"), ...padding];

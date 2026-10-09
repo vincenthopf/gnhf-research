@@ -320,7 +320,10 @@ describe("buildIterationPrompt workflow", () => {
       "- evidence_origin: executed, source_read, reasoning_only, or none",
     );
     expect(section).toContain("- claim: a non-empty string");
-    expect(section).toContain("Optional fields: boundary");
+    expect(section).toContain(
+      "Every claim record needs a non-empty boundary (what the claim does NOT show). Contract records, observer records and records that a later record reframes do not. gnhf counts claim records without a boundary as no boundary in the research stats.",
+    );
+    expect(section).toContain("Optional fields: sources, next, and reframes");
     expect(section).toContain("reframes");
     expect(section).toContain("append only");
     expect(section).toContain("Never edit, reorder or delete an earlier line");
@@ -361,7 +364,7 @@ describe("buildIterationPrompt workflow", () => {
     );
     expect(section).toContain('"type": "contract"');
     expect(section).toContain(
-      "A contract stays open until its id appears in contracts_run or a later record reframes it",
+      "A contract stays open until its id appears in the contracts_run of a successful iteration or a later record reframes it",
     );
   });
 
@@ -380,7 +383,7 @@ describe("buildIterationPrompt workflow", () => {
     );
     expect(result).toContain("## Change Approach");
     expect(section).toContain(
-      "- the last 3 research iterations changed no goal (goals_changed was empty)",
+      "- the last 3 research iterations changed no goal (each failed or had an empty goals_changed)",
     );
     expect(section).toContain(
       "- the last 3 research iterations were reasoning_only",
