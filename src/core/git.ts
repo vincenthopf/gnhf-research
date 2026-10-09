@@ -239,7 +239,7 @@ export function commitAll(
   message: string,
   cwd: string,
   options: { verify?: boolean } = {},
-): void {
+): boolean {
   // -c commit.gpgsign=false / tag.gpgsign=false: a user with global
   // signing enabled would otherwise have every gnhf iteration spawn gpg
   // and (for a locked agent) wait on a pinentry passphrase prompt that
@@ -258,7 +258,7 @@ export function commitAll(
   git(["add", "-A"], cwd);
   try {
     git(["diff", "--cached", "--quiet"], cwd);
-    return;
+    return false;
   } catch {
     // Exit 1 means there are staged changes to commit.
   }
@@ -273,6 +273,7 @@ export function commitAll(
     });
     throw commitError;
   }
+  return true;
 }
 
 export function pushCurrentBranch(cwd: string): void {

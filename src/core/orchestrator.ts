@@ -143,7 +143,8 @@ export class Orchestrator extends EventEmitter<OrchestratorEvents> {
   private activeAbortController: AbortController | null = null;
   private pendingAbortReason: string | null = null;
   private pendingCommitFailure: string | null = null;
-  private wrapUpRunning = false;
+  private wrapUpStopReason: string | null = null;
+  private noProgressStreak = 0;
   private activeIterationTokensEstimated = false;
   private activeIterationOverage: UsageOverage | null = null;
   private fallbackModelActive = false;
@@ -336,7 +337,7 @@ export class Orchestrator extends EventEmitter<OrchestratorEvents> {
         this.emit("state", this.getState());
 
         const finalIteration = this.getFinalIteration();
-        this.wrapUpRunning = finalIteration?.wrapUpOnly === true;
+        this.wrapUpStopReason = finalIteration?.stopReason ?? null;
         const baseIterationPrompt = buildIterationPrompt({
           n: this.state.currentIteration,
           runId: this.runInfo.runId,
@@ -346,7 +347,14 @@ export class Orchestrator extends EventEmitter<OrchestratorEvents> {
           ...(this.limits.until === undefined
             ? {}
             : { deadline: formatDeadline(this.limits.until) }),
-          ...(finalIteration === undefined ? {} : { finalIteration }),
+          ...(finalIteration === undefined
+            ? {}
+            : {
+                finalIteration: {
+                  reason: finalIteration.reason,
+                  wrapUpOnly: finalIteration.wrapUpOnly,
+                },
+              }),
         });
         const iterationPrompt = this.pendingCommitFailure
           ? this.buildCommitRepairPrompt(baseIterationPrompt)
@@ -462,8 +470,9 @@ export class Orchestrator extends EventEmitter<OrchestratorEvents> {
           break;
         }
 
-        if (this.wrapUpRunning && this.limits.until !== undefined) {
-          this.abort(`deadline reached (${formatDeadline(this.limits.until)})`);
+        if (this.wrapUpStopReason !== null) {
+          this.state.lastAgentError = null;
+          this.abort(this.wrapUpStopReason);
           break;
         }
 
@@ -474,7 +483,9 @@ export class Orchestrator extends EventEmitter<OrchestratorEvents> {
         }
 
         if (
-          this.state.consecutiveFailures >= this.config.maxConsecutiveFailures
+          this.state.consecutiveFailures >=
+            this.config.maxConsecutiveFailures &&
+          this.noProgressStreak < this.config.maxConsecutiveFailures
         ) {
           this.abort(
             `${this.config.maxConsecutiveFailures} consecutive failures`,
@@ -806,12 +817,13 @@ export class Orchestrator extends EventEmitter<OrchestratorEvents> {
     const keyChanges = toStringArray(output.key_changes_made);
     const keyLearnings = toStringArray(output.key_learnings);
     try {
-      commitAll(
+      const committed = commitAll(
         buildCommitMessage(this.config.commitMessage, output, {
           iteration: this.state.currentIteration,
         }),
         this.cwd,
       );
+      this.noProgressStreak = committed ? 0 : this.noProgressStreak + 1;
     } catch (error) {
       if (error instanceof CommitFailedError) {
         return this.recordCommitFailure(error);
@@ -863,6 +875,7 @@ ${this.pendingCommitFailure}
 
   private recordCommitFailure(error: CommitFailedError): IterationRecord {
     this.pendingCommitFailure = error.detail;
+    this.noProgressStreak = 0;
     const summary = "git commit failed; asking agent to repair the workspace";
     appendNotes(
       this.runInfo.notesPath,
@@ -929,6 +942,7 @@ ${this.pendingCommitFailure}
       this.state.consecutiveErrors++;
       this.state.lastAgentError = recordSummary;
     } else {
+      this.noProgressStreak++;
       this.state.consecutiveErrors = 0;
       this.state.lastAgentError = null;
     }
@@ -1104,15 +1118,25 @@ ${this.pendingCommitFailure}
   }
 
   private getFinalIteration():
-    | { reason: string; wrapUpOnly: boolean }
+    | { reason: string; wrapUpOnly: boolean; stopReason?: string }
     | undefined {
     if (
       this.limits.until !== undefined &&
       Date.now() >= this.limits.until.getTime()
     ) {
+      const deadline = formatDeadline(this.limits.until);
       return {
-        reason: `the run deadline (${formatDeadline(this.limits.until)}) has passed`,
+        reason: `the run deadline (${deadline}) has passed`,
         wrapUpOnly: true,
+        stopReason: `deadline reached (${deadline})`,
+      };
+    }
+    const noProgressLimit = this.config.maxConsecutiveFailures;
+    if (this.noProgressStreak >= noProgressLimit) {
+      return {
+        reason: `the last ${noProgressLimit} iterations made no progress (no commit)`,
+        wrapUpOnly: true,
+        stopReason: `no progress in ${noProgressLimit} consecutive iterations`,
       };
     }
     if (

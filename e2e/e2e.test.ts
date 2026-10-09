@@ -305,6 +305,33 @@ describe("gnhf e2e", () => {
     expect(git(["rev-list", "--count", "HEAD"], cwd)).toBe("3");
   }, 30_000);
 
+  it("wraps up and stops after three iterations that change nothing", async () => {
+    const cwd = createRepo();
+    tempDirs.push(cwd);
+    const logDir = mkdtempSync(join(tmpdir(), "gnhf-e2e-logs-"));
+    tempDirs.push(logDir);
+    const mockLogPath = join(logDir, "mock-claude.jsonl");
+
+    const result = await runCli(cwd, ["ship it", "--max-iterations", "10"], {
+      env: {
+        ...createTestEnv(mockLogPath, tempDirs),
+        GNHF_MOCK_CLAUDE_NO_CHANGES: "1",
+      },
+    });
+
+    expect(result.code).toBe(0);
+    expect(result.stdout).toContain("no progress in 3 consecutive iterations");
+    const prompts = readJsonLines(mockLogPath)
+      .filter((entry) => entry.event === "spawn")
+      .map((entry) => String(entry.prompt));
+    expect(prompts).toHaveLength(4);
+    expect(prompts[2]).not.toContain("## Final Iteration");
+    expect(prompts[3]).toContain("## Final Iteration");
+    expect(prompts[3]).toContain("made no progress");
+    expect(prompts[3]).toContain("Do not start new work");
+    expect(git(["rev-list", "--count", "HEAD"], cwd)).toBe("1");
+  }, 30_000);
+
   it("runs only a wrap-up iteration when --until has already passed", async () => {
     const cwd = createRepo();
     tempDirs.push(cwd);

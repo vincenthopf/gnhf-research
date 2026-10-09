@@ -158,6 +158,17 @@ describe("git utilities", () => {
   });
 
   describe("commitAll", () => {
+    it("returns true after committing staged changes", () => {
+      mockStagedChanges();
+
+      expect(commitAll("work", "/repo")).toBe(true);
+    });
+
+    it("returns false without committing when nothing is staged", () => {
+      expect(commitAll("work", "/repo")).toBe(false);
+      expect(mockExecFileSync).toHaveBeenCalledTimes(2);
+    });
+
     it("stages all files and passes the message as its own argv entry", () => {
       mockStagedChanges();
 

@@ -4,7 +4,7 @@ vi.mock("./git.js", async (importOriginal) => {
   const actual = await importOriginal<typeof import("./git.js")>();
   return {
     ...actual,
-    commitAll: vi.fn(),
+    commitAll: vi.fn(() => true),
     getBranchCommitCount: vi.fn(() => 0),
     getCurrentBranch: vi.fn(() => "gnhf/run-abc"),
     getHeadCommit: vi.fn(() => "head123"),
@@ -311,10 +311,27 @@ describe("Orchestrator output normalization", () => {
   });
 });
 
+function createReportedFailureResult(): AgentResult {
+  const result = createSuccessResult();
+  return { ...result, output: { ...result.output, success: false } };
+}
+
+async function runWithFakeTimers(orchestrator: Orchestrator): Promise<void> {
+  let done = false;
+  const started = orchestrator.start().then(() => {
+    done = true;
+  });
+  while (!done) {
+    await vi.advanceTimersByTimeAsync(10 * 60_000);
+  }
+  await started;
+}
+
 describe("Orchestrator stop limits", () => {
   beforeEach(() => {
     vi.clearAllMocks();
     vi.useRealTimers();
+    mockCommitAll.mockReturnValue(true);
   });
 
   it("marks the last capped iteration as the final iteration", async () => {
@@ -341,6 +358,274 @@ describe("Orchestrator stop limits", () => {
       reason: "this is the last iteration allowed by --max-iterations (2)",
       wrapUpOnly: false,
     });
+  });
+
+  it("wraps up and stops after three successful iterations without a commit", async () => {
+    mockCommitAll.mockReturnValue(false);
+    const agent: Agent = {
+      name: "claude",
+      run: vi.fn(async () => createSuccessResult()),
+    };
+    const orchestrator = new Orchestrator(
+      config,
+      agent,
+      runInfo,
+      "ship it",
+      "/repo",
+      0,
+      { maxIterations: 10 },
+    );
+    const abort = vi.fn();
+    orchestrator.on("abort", abort);
+
+    await orchestrator.start();
+
+    expect(agent.run).toHaveBeenCalledTimes(4);
+    const calls = vi.mocked(buildIterationPrompt).mock.calls;
+    expect(calls[2]![0].finalIteration).toBeUndefined();
+    expect(calls[3]![0].finalIteration).toEqual({
+      reason: "the last 3 iterations made no progress (no commit)",
+      wrapUpOnly: true,
+    });
+    expect(abort).toHaveBeenCalledWith(
+      "no progress in 3 consecutive iterations",
+    );
+  });
+
+  it("uses maxConsecutiveFailures as the no-progress limit", async () => {
+    const agent: Agent = {
+      name: "claude",
+      run: vi.fn(async () => createReportedFailureResult()),
+    };
+    const orchestrator = new Orchestrator(
+      { ...config, maxConsecutiveFailures: 5 },
+      agent,
+      runInfo,
+      "ship it",
+      "/repo",
+      0,
+      { maxIterations: 10 },
+    );
+    const abort = vi.fn();
+    orchestrator.on("abort", abort);
+
+    await orchestrator.start();
+
+    expect(agent.run).toHaveBeenCalledTimes(6);
+    expect(
+      vi.mocked(buildIterationPrompt).mock.calls[5]![0].finalIteration,
+    ).toEqual({
+      reason: "the last 5 iterations made no progress (no commit)",
+      wrapUpOnly: true,
+    });
+    expect(abort).toHaveBeenCalledWith(
+      "no progress in 5 consecutive iterations",
+    );
+  });
+
+  it("still aborts on consecutive failures when an agent error breaks the no-progress streak", async () => {
+    vi.useFakeTimers();
+    let calls = 0;
+    const agent: Agent = {
+      name: "claude",
+      run: vi.fn(async () => {
+        calls++;
+        if (calls === 3) throw new Error("transient error");
+        return createReportedFailureResult();
+      }),
+    };
+    const orchestrator = new Orchestrator(
+      config,
+      agent,
+      runInfo,
+      "ship it",
+      "/repo",
+      0,
+      { maxIterations: 10 },
+    );
+    const abort = vi.fn();
+    orchestrator.on("abort", abort);
+
+    await runWithFakeTimers(orchestrator);
+
+    expect(agent.run).toHaveBeenCalledTimes(3);
+    expect(
+      vi
+        .mocked(buildIterationPrompt)
+        .mock.calls.map((call) => call[0].finalIteration),
+    ).toEqual([undefined, undefined, undefined]);
+    expect(abort).toHaveBeenCalledWith("3 consecutive failures");
+  });
+
+  it("does not reset the no-progress streak on an agent error", async () => {
+    vi.useFakeTimers();
+    mockCommitAll.mockReturnValue(false);
+    let calls = 0;
+    const agent: Agent = {
+      name: "claude",
+      run: vi.fn(async () => {
+        calls++;
+        if (calls === 3) throw new Error("transient error");
+        return createSuccessResult();
+      }),
+    };
+    const orchestrator = new Orchestrator(
+      config,
+      agent,
+      runInfo,
+      "ship it",
+      "/repo",
+      0,
+      { maxIterations: 10 },
+    );
+    const abort = vi.fn();
+    orchestrator.on("abort", abort);
+
+    await runWithFakeTimers(orchestrator);
+
+    expect(agent.run).toHaveBeenCalledTimes(5);
+    expect(
+      vi.mocked(buildIterationPrompt).mock.calls[4]![0].finalIteration
+        ?.wrapUpOnly,
+    ).toBe(true);
+    expect(abort).toHaveBeenCalledWith(
+      "no progress in 3 consecutive iterations",
+    );
+  });
+
+  it("restarts the no-progress streak after a commit failure", async () => {
+    mockCommitAll
+      .mockReturnValueOnce(false)
+      .mockReturnValueOnce(false)
+      .mockImplementationOnce(() => {
+        throw new CommitFailedError(new Error("hook failed"));
+      })
+      .mockReturnValueOnce(false)
+      .mockReturnValueOnce(false);
+    const agent: Agent = {
+      name: "claude",
+      run: vi.fn(async () => createSuccessResult()),
+    };
+    const orchestrator = new Orchestrator(
+      config,
+      agent,
+      runInfo,
+      "ship it",
+      "/repo",
+      0,
+      { maxIterations: 5 },
+    );
+    const abort = vi.fn();
+    orchestrator.on("abort", abort);
+
+    await orchestrator.start();
+
+    expect(agent.run).toHaveBeenCalledTimes(5);
+    expect(
+      vi
+        .mocked(buildIterationPrompt)
+        .mock.calls.map((call) => call[0].finalIteration?.wrapUpOnly),
+    ).toEqual([undefined, undefined, undefined, undefined, false]);
+    expect(abort).toHaveBeenCalledWith("max iterations reached (5)");
+  });
+
+  it("reports the no-progress stop even when the wrap-up iteration errors", async () => {
+    vi.useFakeTimers();
+    let calls = 0;
+    const agent: Agent = {
+      name: "claude",
+      run: vi.fn(async () => {
+        calls++;
+        if (calls === 4) throw new Error("wrap-up crashed");
+        return createReportedFailureResult();
+      }),
+    };
+    const orchestrator = new Orchestrator(
+      { ...config, maxConsecutiveFailures: 3 },
+      agent,
+      runInfo,
+      "ship it",
+      "/repo",
+      0,
+      { maxIterations: 10 },
+    );
+    const abort = vi.fn();
+    orchestrator.on("abort", abort);
+
+    await runWithFakeTimers(orchestrator);
+
+    expect(agent.run).toHaveBeenCalledTimes(4);
+    expect(abort).toHaveBeenCalledWith(
+      "no progress in 3 consecutive iterations",
+    );
+    expect(orchestrator.getState().lastAgentError).toBeNull();
+  });
+
+  it("wraps up instead of aborting on three reported failures", async () => {
+    const agent: Agent = {
+      name: "claude",
+      run: vi.fn(async () => createReportedFailureResult()),
+    };
+    const orchestrator = new Orchestrator(
+      config,
+      agent,
+      runInfo,
+      "ship it",
+      "/repo",
+      0,
+      { maxIterations: 10 },
+    );
+    const abort = vi.fn();
+    orchestrator.on("abort", abort);
+
+    await orchestrator.start();
+
+    expect(agent.run).toHaveBeenCalledTimes(4);
+    expect(
+      vi.mocked(buildIterationPrompt).mock.calls[3]![0].finalIteration,
+    ).toEqual({
+      reason: "the last 3 iterations made no progress (no commit)",
+      wrapUpOnly: true,
+    });
+    expect(abort).toHaveBeenCalledTimes(1);
+    expect(abort).toHaveBeenCalledWith(
+      "no progress in 3 consecutive iterations",
+    );
+  });
+
+  it("resets the no-progress streak when an iteration commits", async () => {
+    mockCommitAll
+      .mockReturnValueOnce(false)
+      .mockReturnValueOnce(false)
+      .mockReturnValueOnce(true)
+      .mockReturnValueOnce(false)
+      .mockReturnValueOnce(false);
+    const agent: Agent = {
+      name: "claude",
+      run: vi.fn(async () => createSuccessResult()),
+    };
+    const orchestrator = new Orchestrator(
+      config,
+      agent,
+      runInfo,
+      "ship it",
+      "/repo",
+      0,
+      { maxIterations: 5 },
+    );
+    const abort = vi.fn();
+    orchestrator.on("abort", abort);
+
+    await orchestrator.start();
+
+    expect(agent.run).toHaveBeenCalledTimes(5);
+    expect(
+      vi
+        .mocked(buildIterationPrompt)
+        .mock.calls.slice(0, 4)
+        .map((call) => call[0].finalIteration),
+    ).toEqual([undefined, undefined, undefined, undefined]);
+    expect(abort).toHaveBeenCalledWith("max iterations reached (5)");
   });
 
   it("runs one wrap-up iteration when the deadline has already passed", async () => {

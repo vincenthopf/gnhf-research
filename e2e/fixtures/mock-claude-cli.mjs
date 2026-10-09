@@ -147,7 +147,9 @@ if (shouldHang()) {
   }
   setInterval(() => {}, 1_000);
 } else {
-  applyWorkspaceChange();
+  if (process.env.GNHF_MOCK_CLAUDE_NO_CHANGES !== "1") {
+    applyWorkspaceChange();
+  }
   writeResult("mocked objective complete");
   process.exit(0);
 }
