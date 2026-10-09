@@ -28,6 +28,7 @@ import {
   type InterruptHint,
 } from "./interrupt-state.js";
 import { buildCommitMessage } from "./commit-message.js";
+import { formatDeadline } from "./deadline.js";
 import { buildIterationPrompt } from "../templates/iteration-prompt.js";
 import { getTotalTokenCount } from "../utils/tokens.js";
 
@@ -87,6 +88,7 @@ export interface RunLimits {
   maxTokens?: number;
   maxRateLimitWaitMs?: number;
   stopWhen?: string;
+  until?: Date;
   push?: boolean;
   // Finished iterations restored on resume. Distinct from startIteration,
   // which follows the newest attempt log even when that attempt never ended.
@@ -141,6 +143,7 @@ export class Orchestrator extends EventEmitter<OrchestratorEvents> {
   private activeAbortController: AbortController | null = null;
   private pendingAbortReason: string | null = null;
   private pendingCommitFailure: string | null = null;
+  private wrapUpRunning = false;
   private activeIterationTokensEstimated = false;
   private activeIterationOverage: UsageOverage | null = null;
   private fallbackModelActive = false;
@@ -308,6 +311,7 @@ export class Orchestrator extends EventEmitter<OrchestratorEvents> {
       startIteration: this.state.currentIteration,
       maxIterations: this.limits.maxIterations,
       maxTokens: this.limits.maxTokens,
+      until: this.limits.until?.toISOString(),
       maxRateLimitWaitMs: this.limits.maxRateLimitWaitMs,
       push: this.limits.push === true,
       maxConsecutiveFailures: this.config.maxConsecutiveFailures,
@@ -331,12 +335,18 @@ export class Orchestrator extends EventEmitter<OrchestratorEvents> {
         this.emit("iteration:start", this.state.currentIteration);
         this.emit("state", this.getState());
 
+        const finalIteration = this.getFinalIteration();
+        this.wrapUpRunning = finalIteration?.wrapUpOnly === true;
         const baseIterationPrompt = buildIterationPrompt({
           n: this.state.currentIteration,
           runId: this.runInfo.runId,
           prompt: this.prompt,
           stopWhen: this.limits.stopWhen,
           commitMessage: this.config.commitMessage,
+          ...(this.limits.until === undefined
+            ? {}
+            : { deadline: formatDeadline(this.limits.until) }),
+          ...(finalIteration === undefined ? {} : { finalIteration }),
         });
         const iterationPrompt = this.pendingCommitFailure
           ? this.buildCommitRepairPrompt(baseIterationPrompt)
@@ -452,6 +462,11 @@ export class Orchestrator extends EventEmitter<OrchestratorEvents> {
           break;
         }
 
+        if (this.wrapUpRunning && this.limits.until !== undefined) {
+          this.abort(`deadline reached (${formatDeadline(this.limits.until)})`);
+          break;
+        }
+
         const postIterationAbortReason = this.getPostIterationAbortReason();
         if (postIterationAbortReason) {
           this.abort(postIterationAbortReason);
@@ -526,8 +541,12 @@ export class Orchestrator extends EventEmitter<OrchestratorEvents> {
         }
 
         if (this.state.consecutiveErrors > 0 && !this.stopRequested) {
-          const backoffMs =
-            60_000 * Math.pow(2, this.state.consecutiveErrors - 1);
+          const backoffMs = Math.min(
+            60_000 * Math.pow(2, this.state.consecutiveErrors - 1),
+            this.limits.until === undefined
+              ? Infinity
+              : Math.max(0, this.limits.until.getTime() - Date.now()),
+          );
           this.state.status = "waiting";
           this.state.waitingUntil = new Date(Date.now() + backoffMs);
           this.emit("state", this.getState());
@@ -970,6 +989,25 @@ ${this.pendingCommitFailure}
       );
       return "stop";
     }
+    if (
+      this.limits.until !== undefined &&
+      Date.now() + waitMs > this.limits.until.getTime()
+    ) {
+      appendDebugLog(`${logPrefix}:wait:past-deadline`, {
+        iteration: this.state.currentIteration,
+        message,
+        resumeAt: resumeAt?.toISOString() ?? null,
+        waitMs,
+        until: this.limits.until.toISOString(),
+      });
+      if (clearAgentErrorOnAbort) {
+        this.state.lastAgentError = null;
+      }
+      this.abort(
+        `deadline reached (${formatDeadline(this.limits.until)}) before the usage limit resets`,
+      );
+      return "stop";
+    }
     this.totalRateLimitWaitMs = nextTotalWaitMs;
     if (rollBackIteration) {
       this.state.currentIteration--;
@@ -1063,6 +1101,30 @@ ${this.pendingCommitFailure}
         resolve();
       });
     });
+  }
+
+  private getFinalIteration():
+    | { reason: string; wrapUpOnly: boolean }
+    | undefined {
+    if (
+      this.limits.until !== undefined &&
+      Date.now() >= this.limits.until.getTime()
+    ) {
+      return {
+        reason: `the run deadline (${formatDeadline(this.limits.until)}) has passed`,
+        wrapUpOnly: true,
+      };
+    }
+    if (
+      this.limits.maxIterations !== undefined &&
+      this.state.currentIteration >= this.limits.maxIterations
+    ) {
+      return {
+        reason: `this is the last iteration allowed by --max-iterations (${this.limits.maxIterations})`,
+        wrapUpOnly: false,
+      };
+    }
+    return undefined;
   }
 
   private getPreIterationAbortReason(): string | null {

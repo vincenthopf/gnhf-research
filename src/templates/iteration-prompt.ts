@@ -9,6 +9,8 @@ export function buildIterationPrompt(params: {
   prompt: string;
   stopWhen?: string;
   commitMessage?: CommitMessageConfig;
+  deadline?: string;
+  finalIteration?: { reason: string; wrapUpOnly: boolean };
 }): string {
   const outputFields = [
     "- success: whether you were able to make a meaningful contribution that got us closer towards the objective. setting this to false means any code change you made should be discarded. A complete no-op iteration (no file changes AND no new meaningful learnings worth recording) is not a success - set success=false so the run can halt rather than spin on no-op iterations",
@@ -40,6 +42,18 @@ export function buildIterationPrompt(params: {
       ? `\n\n## Stop Condition\n\nThe user has configured a condition to end the loop: ${params.stopWhen}\nIf this condition is fully met after this iteration's work, set should_fully_stop=true in your output. Otherwise set it to false.`
       : "";
 
+  const deadlineSection =
+    params.deadline !== undefined
+      ? `\n\n## Deadline\n\nThe run ends at ${params.deadline} local time. Once it passes, gnhf runs one final wrap-up iteration and stops. Size each iteration so it can finish before then.`
+      : "";
+
+  const finalIterationSection =
+    params.finalIteration === undefined
+      ? ""
+      : params.finalIteration.wrapUpOnly
+        ? `\n\n## Final Iteration\n\nThis is the final iteration of the run: ${params.finalIteration.reason}. Do not start new work. Finish and verify anything left half-done so the tree is in a state worth committing, record what is complete and what is not, and post the final summary or handoff the objective asks for. gnhf stops after this iteration whatever its outcome.`
+        : `\n\n## Final Iteration\n\nThis is the final iteration of the run: ${params.finalIteration.reason}. Choose work you can finish and verify in this iteration, then post the final summary or handoff the objective asks for before you submit. gnhf stops after this iteration.`;
+
   return `You are working autonomously towards an objective given below.
 This is iteration ${params.n}. Each iteration aims to make an incremental step forward, not to complete the entire objective.
 
@@ -54,7 +68,7 @@ This is iteration ${params.n}. Each iteration aims to make an incremental step f
 
 ## Output
 
-${outputFields.join("\n")}${stopConditionSection}
+${outputFields.join("\n")}${stopConditionSection}${deadlineSection}${finalIterationSection}
 
 ## Objective
 

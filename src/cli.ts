@@ -16,6 +16,7 @@ import process from "node:process";
 import { createInterface } from "node:readline";
 import { Command, InvalidArgumentError } from "commander";
 import { loadConfig } from "./core/config.js";
+import { parseUntil } from "./core/deadline.js";
 import {
   EFFORT_LEVEL_LIST,
   isEffortLevel,
@@ -122,6 +123,23 @@ function parseDuration(value: string): number {
     throw new InvalidArgumentError("must be a safe duration");
   }
   return duration;
+}
+
+function parseUntilOption(value: string): Date {
+  try {
+    return parseUntil(value);
+  } catch (err) {
+    throw new InvalidArgumentError((err as Error).message);
+  }
+}
+
+function pinUntilArg(args: string[], until: Date | undefined): string[] {
+  if (until === undefined) return args;
+  const instant = until.toISOString();
+  return args.map((arg, index) => {
+    if (arg.startsWith("--until=")) return `--until=${instant}`;
+    return args[index - 1] === "--until" ? instant : arg;
+  });
 }
 
 function parseMeteorFrequency(value: string): number {
@@ -639,6 +657,11 @@ program
     parseDuration,
   )
   .option(
+    "--until <time>",
+    'Wrap up and stop at this local time ("17:30" for its next occurrence, or "2026-10-11T06:00"); runs one final summary iteration once it passes',
+    parseUntilOption,
+  )
+  .option(
     "--fallback-model <model>",
     "Retry a Claude usage-limit rejection with this model instead of waiting",
   )
@@ -682,6 +705,7 @@ program
         maxIterations?: number;
         maxTokens?: number;
         maxRateLimitWait?: number;
+        until?: Date;
         fallbackModel?: string;
         stopWhen?: string;
         preventSleep?: boolean;
@@ -977,22 +1001,25 @@ program
         try {
           const sleepPrevention =
             initialSleepPrevention ??
-            (await startSleepPrevention(process.argv.slice(2), {
-              reexecEnv:
-                persistedPrompt || createdWorktreePath
-                  ? {
-                      ...(persistedPrompt
-                        ? {
-                            [GNHF_REEXEC_STDIN_PROMPT_FILE]:
-                              persistedPrompt.path,
-                          }
-                        : {}),
-                      ...(createdWorktreePath
-                        ? { [GNHF_REEXEC_NEW_WORKTREE]: createdWorktreePath }
-                        : {}),
-                    }
-                  : undefined,
-            }));
+            (await startSleepPrevention(
+              pinUntilArg(process.argv.slice(2), options.until),
+              {
+                reexecEnv:
+                  persistedPrompt || createdWorktreePath
+                    ? {
+                        ...(persistedPrompt
+                          ? {
+                              [GNHF_REEXEC_STDIN_PROMPT_FILE]:
+                                persistedPrompt.path,
+                            }
+                          : {}),
+                        ...(createdWorktreePath
+                          ? { [GNHF_REEXEC_NEW_WORKTREE]: createdWorktreePath }
+                          : {}),
+                      }
+                    : undefined,
+              },
+            ));
           if (sleepPrevention.type === "reexeced") {
             reexeced = true;
             // The re-execed child now owns the worktree lifecycle. Do not let
@@ -1044,6 +1071,7 @@ program
         maxIterations: options.maxIterations,
         maxTokens: options.maxTokens,
         maxRateLimitWaitMs: options.maxRateLimitWait,
+        until: options.until?.toISOString(),
         fallbackModel: options.fallbackModel,
         effort: config.effort,
         stopWhen: effectiveStopWhen,
@@ -1083,6 +1111,7 @@ program
           maxTokens: options.maxTokens,
           completedIterations: getCompletedIterationCount(runInfo),
           stopWhen: effectiveStopWhen,
+          ...(options.until === undefined ? {} : { until: options.until }),
           ...(options.maxRateLimitWait === undefined
             ? {}
             : { maxRateLimitWaitMs: options.maxRateLimitWait }),

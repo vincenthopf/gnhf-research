@@ -51,6 +51,8 @@ import {
   type AgentResult,
 } from "./agents/types.js";
 import { CONVENTIONAL_COMMIT_MESSAGE } from "./commit-message.js";
+import { formatDeadline } from "./deadline.js";
+import { buildIterationPrompt } from "../templates/iteration-prompt.js";
 import type { Config } from "./config.js";
 import type { RunInfo } from "./run.js";
 
@@ -313,6 +315,253 @@ describe("Orchestrator stop limits", () => {
   beforeEach(() => {
     vi.clearAllMocks();
     vi.useRealTimers();
+  });
+
+  it("marks the last capped iteration as the final iteration", async () => {
+    const agent: Agent = {
+      name: "claude",
+      run: vi.fn(async () => createSuccessResult()),
+    };
+    const orchestrator = new Orchestrator(
+      config,
+      agent,
+      runInfo,
+      "ship it",
+      "/repo",
+      0,
+      { maxIterations: 2 },
+    );
+
+    await orchestrator.start();
+
+    const calls = vi.mocked(buildIterationPrompt).mock.calls;
+    expect(calls).toHaveLength(2);
+    expect(calls[0]![0].finalIteration).toBeUndefined();
+    expect(calls[1]![0].finalIteration).toEqual({
+      reason: "this is the last iteration allowed by --max-iterations (2)",
+      wrapUpOnly: false,
+    });
+  });
+
+  it("runs one wrap-up iteration when the deadline has already passed", async () => {
+    const agent: Agent = {
+      name: "claude",
+      run: vi.fn(async () => createSuccessResult()),
+    };
+    const until = new Date(Date.now() - 60_000);
+    const orchestrator = new Orchestrator(
+      config,
+      agent,
+      runInfo,
+      "ship it",
+      "/repo",
+      0,
+      { until },
+    );
+    const abort = vi.fn();
+    orchestrator.on("abort", abort);
+
+    await orchestrator.start();
+
+    expect(agent.run).toHaveBeenCalledTimes(1);
+    const params = vi.mocked(buildIterationPrompt).mock.calls[0]![0];
+    expect(params.deadline).toBe(formatDeadline(until));
+    expect(params.finalIteration).toEqual({
+      reason: `the run deadline (${formatDeadline(until)}) has passed`,
+      wrapUpOnly: true,
+    });
+    expect(mockCommitAll).toHaveBeenCalledTimes(1);
+    expect(abort).toHaveBeenCalledWith(
+      `deadline reached (${formatDeadline(until)})`,
+    );
+  });
+
+  it("stops after the wrap-up iteration even when it fails", async () => {
+    const agent: Agent = {
+      name: "claude",
+      run: vi.fn(async () => ({
+        ...createSuccessResult(),
+        output: { ...createSuccessResult().output, success: false },
+      })),
+    };
+    const until = new Date(Date.now() - 60_000);
+    const orchestrator = new Orchestrator(
+      config,
+      agent,
+      runInfo,
+      "ship it",
+      "/repo",
+      0,
+      { until },
+    );
+    const abort = vi.fn();
+    orchestrator.on("abort", abort);
+
+    await orchestrator.start();
+
+    expect(agent.run).toHaveBeenCalledTimes(1);
+    expect(abort).toHaveBeenCalledWith(
+      `deadline reached (${formatDeadline(until)})`,
+    );
+  });
+
+  it("stops without waiting when the wrap-up iteration is rate-limited", async () => {
+    vi.useFakeTimers();
+    const until = new Date(Date.now() - 60_000);
+    let calls = 0;
+    const agent: Agent = {
+      name: "claude",
+      run: vi.fn(async () => {
+        calls++;
+        if (calls === 1) {
+          throw new RateLimitAgentError(
+            "claude usage limit reached",
+            "claude exited with code 1: usage limit",
+            new Date(Date.now() - 1_000),
+          );
+        }
+        return createSuccessResult();
+      }),
+    };
+    const orchestrator = new Orchestrator(
+      config,
+      agent,
+      runInfo,
+      "ship it",
+      "/repo",
+      0,
+      { until, maxRateLimitWaitMs: Infinity },
+    );
+    const abort = vi.fn();
+    orchestrator.on("abort", abort);
+
+    const startPromise = orchestrator.start();
+    await vi.waitFor(() => expect(abort).toHaveBeenCalled());
+    await startPromise;
+
+    expect(agent.run).toHaveBeenCalledTimes(1);
+    expect(abort).toHaveBeenCalledWith(
+      `deadline reached (${formatDeadline(until)}) before the usage limit resets`,
+    );
+  });
+
+  it("stops instead of waiting for a usage reset that lands after the deadline", async () => {
+    vi.useFakeTimers();
+    const until = new Date(Date.now() + 10 * 60_000);
+    const agent: Agent = {
+      name: "claude",
+      run: vi.fn(async () => {
+        throw new RateLimitAgentError(
+          "claude usage limit reached",
+          "claude exited with code 1: usage limit",
+          new Date(Date.now() + 2 * 60 * 60_000),
+        );
+      }),
+    };
+    const orchestrator = new Orchestrator(
+      config,
+      agent,
+      runInfo,
+      "ship it",
+      "/repo",
+      0,
+      { until },
+    );
+    const abort = vi.fn();
+    orchestrator.on("abort", abort);
+
+    await orchestrator.start();
+
+    expect(agent.run).toHaveBeenCalledTimes(1);
+    expect(orchestrator.getState().waitingUntil).toBeNull();
+    expect(abort).toHaveBeenCalledWith(
+      `deadline reached (${formatDeadline(until)}) before the usage limit resets`,
+    );
+  });
+
+  it("waits for a usage reset that lands before the deadline and then wraps up", async () => {
+    vi.useFakeTimers();
+    const until = new Date(Date.now() + 10 * 60_000);
+    let calls = 0;
+    const agent: Agent = {
+      name: "claude",
+      run: vi.fn(async () => {
+        calls++;
+        if (calls === 1) {
+          throw new RateLimitAgentError(
+            "claude usage limit reached",
+            "claude exited with code 1: usage limit",
+            new Date(Date.now() + 60_000),
+          );
+        }
+        if (calls === 2) vi.setSystemTime(until.getTime() + 1);
+        return createSuccessResult();
+      }),
+    };
+    const orchestrator = new Orchestrator(
+      config,
+      agent,
+      runInfo,
+      "ship it",
+      "/repo",
+      0,
+      { until },
+    );
+    const abort = vi.fn();
+    orchestrator.on("abort", abort);
+
+    const startPromise = orchestrator.start();
+    await vi.waitFor(() =>
+      expect(orchestrator.getState().status).toBe("waiting"),
+    );
+    await vi.advanceTimersByTimeAsync(3 * 60_000);
+    await startPromise;
+
+    expect(agent.run).toHaveBeenCalledTimes(3);
+    const finals = vi
+      .mocked(buildIterationPrompt)
+      .mock.calls.map(([params]) => params.finalIteration?.wrapUpOnly);
+    expect(finals).toEqual([undefined, undefined, true]);
+    expect(abort).toHaveBeenCalledWith(
+      `deadline reached (${formatDeadline(until)})`,
+    );
+  });
+
+  it("wraps up on the next iteration after the deadline passes mid-run", async () => {
+    const until = new Date(Date.now() + 60 * 60_000);
+    let calls = 0;
+    const agent: Agent = {
+      name: "claude",
+      run: vi.fn(async () => {
+        calls++;
+        if (calls === 2) vi.setSystemTime(until.getTime() + 1);
+        return createSuccessResult();
+      }),
+    };
+    vi.useFakeTimers({ toFake: ["Date"] });
+    const orchestrator = new Orchestrator(
+      config,
+      agent,
+      runInfo,
+      "ship it",
+      "/repo",
+      0,
+      { until, maxIterations: 10 },
+    );
+    const abort = vi.fn();
+    orchestrator.on("abort", abort);
+
+    await orchestrator.start();
+    vi.useRealTimers();
+
+    expect(agent.run).toHaveBeenCalledTimes(3);
+    const finals = vi
+      .mocked(buildIterationPrompt)
+      .mock.calls.map(([params]) => params.finalIteration?.wrapUpOnly);
+    expect(finals).toEqual([undefined, undefined, true]);
+    expect(abort).toHaveBeenCalledWith(
+      `deadline reached (${formatDeadline(until)})`,
+    );
   });
 
   it("aborts before starting when the max iteration cap is already reached", async () => {

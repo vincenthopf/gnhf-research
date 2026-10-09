@@ -113,4 +113,55 @@ describe("buildIterationPrompt", () => {
     expect(result).toContain("complete no-op iteration");
     expect(result).toContain("success=false");
   });
+
+  it("states the run deadline when one is set", () => {
+    const result = buildIterationPrompt({
+      n: 1,
+      runId: "run-1",
+      prompt: "test",
+      deadline: "2026-10-10 17:30",
+    });
+    expect(result).toContain("## Deadline");
+    expect(result).toContain("2026-10-10 17:30");
+    expect(result.trimEnd().endsWith("test")).toBe(true);
+  });
+
+  it("omits the deadline and final iteration sections by default", () => {
+    const result = buildIterationPrompt({ n: 1, runId: "run-1", prompt: "t" });
+    expect(result).not.toContain("## Deadline");
+    expect(result).not.toContain("## Final Iteration");
+  });
+
+  it("asks the last capped iteration to finish its work and post the summary", () => {
+    const result = buildIterationPrompt({
+      n: 5,
+      runId: "run-1",
+      prompt: "test",
+      finalIteration: {
+        reason: "this is the last iteration allowed by --max-iterations (5)",
+        wrapUpOnly: false,
+      },
+    });
+    expect(result).toContain("## Final Iteration");
+    expect(result).toContain(
+      "this is the last iteration allowed by --max-iterations (5)",
+    );
+    expect(result).toContain("final summary");
+    expect(result).not.toContain("Do not start new work");
+  });
+
+  it("tells a deadline wrap-up iteration not to start new work", () => {
+    const result = buildIterationPrompt({
+      n: 5,
+      runId: "run-1",
+      prompt: "test",
+      finalIteration: {
+        reason: "the run deadline (2026-10-10 17:30) has passed",
+        wrapUpOnly: true,
+      },
+    });
+    expect(result).toContain("## Final Iteration");
+    expect(result).toContain("Do not start new work");
+    expect(result).toContain("final summary");
+  });
 });

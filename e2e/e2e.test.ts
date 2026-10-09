@@ -282,6 +282,71 @@ describe("gnhf e2e", () => {
     expect(debugEvents).toContain("run:complete");
   }, 30_000);
 
+  it("tells the last capped iteration it is the final iteration", async () => {
+    const cwd = createRepo();
+    tempDirs.push(cwd);
+    const logDir = mkdtempSync(join(tmpdir(), "gnhf-e2e-logs-"));
+    tempDirs.push(logDir);
+    const mockLogPath = join(logDir, "mock-claude.jsonl");
+
+    const result = await runCli(cwd, ["ship it", "--max-iterations", "2"], {
+      env: createTestEnv(mockLogPath, tempDirs),
+    });
+
+    expect(result.code).toBe(0);
+    expect(result.stdout).toContain("max iterations reached (2)");
+    const prompts = readJsonLines(mockLogPath)
+      .filter((entry) => entry.event === "spawn")
+      .map((entry) => String(entry.prompt));
+    expect(prompts).toHaveLength(2);
+    expect(prompts[0]).not.toContain("## Final Iteration");
+    expect(prompts[1]).toContain("## Final Iteration");
+    expect(prompts[1]).toContain("--max-iterations (2)");
+    expect(git(["rev-list", "--count", "HEAD"], cwd)).toBe("3");
+  }, 30_000);
+
+  it("runs only a wrap-up iteration when --until has already passed", async () => {
+    const cwd = createRepo();
+    tempDirs.push(cwd);
+    const logDir = mkdtempSync(join(tmpdir(), "gnhf-e2e-logs-"));
+    tempDirs.push(logDir);
+    const mockLogPath = join(logDir, "mock-claude.jsonl");
+
+    const result = await runCli(
+      cwd,
+      ["ship it", "--until", "2020-01-01T00:00:00Z"],
+      { env: createTestEnv(mockLogPath, tempDirs) },
+    );
+
+    expect(result.code).toBe(0);
+    expect(result.stdout).toContain("deadline reached");
+    const prompts = readJsonLines(mockLogPath)
+      .filter((entry) => entry.event === "spawn")
+      .map((entry) => String(entry.prompt));
+    expect(prompts).toHaveLength(1);
+    expect(prompts[0]).toContain("## Deadline");
+    expect(prompts[0]).toContain("## Final Iteration");
+    expect(prompts[0]).toContain("Do not start new work");
+    expect(git(["log", "-1", "--format=%s"], cwd)).toContain("gnhf 1:");
+  }, 30_000);
+
+  it("rejects an --until value that is not a time", async () => {
+    const cwd = createRepo();
+    tempDirs.push(cwd);
+    const logDir = mkdtempSync(join(tmpdir(), "gnhf-e2e-logs-"));
+    tempDirs.push(logDir);
+    const mockLogPath = join(logDir, "mock-claude.jsonl");
+
+    const result = await runCli(cwd, ["ship it", "--until", "tomorrow"], {
+      env: createTestEnv(mockLogPath, tempDirs),
+    });
+
+    expect(result.code).not.toBe(0);
+    expect(result.stderr).toContain("--until");
+    expect(result.stderr).toContain("HH:MM");
+    expect(existsSync(mockLogPath)).toBe(false);
+  }, 30_000);
+
   it("passes agents and appendSystemPrompt files from config to claude", async () => {
     const cwd = createRepo();
     tempDirs.push(cwd);
