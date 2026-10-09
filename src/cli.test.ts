@@ -490,6 +490,7 @@ async function runCliResumeWithActualRun(
     liveCommitMessage?: typeof CONVENTIONAL_COMMIT_MESSAGE;
     storedCommitMessage?: "default" | "conventional";
     storedWorkflow?: "default" | "research";
+    storedLedgerPath?: string;
   } = {},
 ) {
   const originalArgv = [...process.argv];
@@ -525,6 +526,13 @@ async function runCliResumeWithActualRun(
   }
   if (opts.storedWorkflow !== undefined) {
     writeFileSync(workflowPath, `${opts.storedWorkflow}\n`, "utf-8");
+  }
+  if (opts.storedLedgerPath !== undefined) {
+    writeFileSync(
+      join(runDir, "ledger-path"),
+      `${opts.storedLedgerPath}\n`,
+      "utf-8",
+    );
   }
 
   const appendDebugLog = vi.fn();
@@ -608,6 +616,8 @@ async function runCliResumeWithActualRun(
     commitMessageExists: boolean;
     commitMessageContent?: string;
     workflowContent?: string;
+    ledgerPathContent?: string;
+    tempDir: string;
   };
 
   try {
@@ -641,6 +651,10 @@ async function runCliResumeWithActualRun(
       workflowContent: existsSync(workflowPath)
         ? readFileSync(workflowPath, "utf-8")
         : undefined,
+      ledgerPathContent: existsSync(join(runDir, "ledger-path"))
+        ? readFileSync(join(runDir, "ledger-path"), "utf-8")
+        : undefined,
+      tempDir,
     };
   } finally {
     process.argv = originalArgv;
@@ -1049,6 +1063,137 @@ describe("cli", () => {
       includeStopField: false,
       effort: "medium",
     });
+  });
+
+  it.each([
+    [["--ledger", "l.jsonl", "ship it"]],
+    [["--ledger", "l.jsonl", "--workflow", "default", "ship it"]],
+  ])(
+    "rejects --ledger without --workflow research before setting up a run: %j",
+    async (args) => {
+      const createAgent = vi.fn(() => ({ name: "claude" }));
+      const setupRun = vi.fn(() => stubRunInfo);
+      const consoleErrorSink: unknown[][] = [];
+      await expect(
+        runCliWithMocks(
+          args,
+          {
+            agentPathOverride: {},
+            agentModel: {},
+            agentArgsOverride: {},
+            effort: "medium",
+            maxConsecutiveFailures: 3,
+            preventSleep: false,
+          },
+          { createAgent, setupRun, consoleErrorSink },
+        ),
+      ).rejects.toThrow("process.exit unexpectedly called with 1");
+      expect(
+        consoleErrorSink.map((call) => call.join(" ")).join("\n"),
+      ).toContain("--ledger requires --workflow research");
+      expect(setupRun).not.toHaveBeenCalled();
+      expect(createAgent).not.toHaveBeenCalled();
+    },
+  );
+
+  it("rejects an empty --ledger before creating the agent", async () => {
+    const createAgent = vi.fn(() => ({ name: "claude" }));
+    const stderrWrite = vi
+      .spyOn(process.stderr, "write")
+      .mockImplementation(() => true);
+    try {
+      await expect(
+        runCliWithMocks(
+          ["--workflow", "research", "--ledger", " ", "ship it"],
+          {
+            agentPathOverride: {},
+            agentModel: {},
+            agentArgsOverride: {},
+            effort: "medium",
+            maxConsecutiveFailures: 3,
+            preventSleep: false,
+          },
+          { createAgent },
+        ),
+      ).rejects.toThrow("process.exit unexpectedly called with 1");
+      expect(
+        stderrWrite.mock.calls.map(([chunk]) => String(chunk)).join(""),
+      ).toContain("must not be empty");
+    } finally {
+      stderrWrite.mockRestore();
+    }
+    expect(createAgent).not.toHaveBeenCalled();
+  });
+
+  it("threads --ledger into run setup but not into agent creation", async () => {
+    const { createAgent, setupRun, appendDebugLog } = await runCliWithMocks(
+      ["ship it", "--workflow", "research", "--ledger", "research/l.jsonl"],
+      {
+        agentPathOverride: {},
+        agentModel: {},
+        agentArgsOverride: {},
+        effort: "medium",
+        maxConsecutiveFailures: 3,
+        preventSleep: false,
+      },
+      {
+        setupRun: vi.fn(() => ({
+          ...stubRunInfo,
+          workflow: "research",
+          ledgerPath: "/repo/research/l.jsonl",
+        })),
+      },
+    );
+
+    expect(setupRun).toHaveBeenCalledWith(
+      expect.stringMatching(/^ship-it-/),
+      "ship it",
+      "abc123",
+      process.cwd(),
+      {
+        includeStopField: false,
+        workflow: "research",
+        ledger: "research/l.jsonl",
+      },
+    );
+    expect(createAgent).toHaveBeenCalledWith(undefined, undefined, {
+      includeStopField: false,
+      workflow: "research",
+      effort: "medium",
+    });
+    expect(appendDebugLog).toHaveBeenCalledWith(
+      "run:start",
+      expect.objectContaining({ ledgerPath: "/repo/research/l.jsonl" }),
+    );
+  });
+
+  it("keeps the stored ledger path when resuming a gnhf branch without --ledger", async () => {
+    const { orchestratorCtor, ledgerPathContent, tempDir } =
+      await runCliResumeWithActualRun([], undefined, {
+        storedWorkflow: "research",
+        storedLedgerPath: "research/l.jsonl",
+      });
+
+    expect(ledgerPathContent).toBe("research/l.jsonl\n");
+    const runInfoArg = orchestratorCtor.mock.calls[0]![2] as {
+      ledgerPath?: string;
+    };
+    expect(runInfoArg.ledgerPath).toBe(join(tempDir, "research", "l.jsonl"));
+  });
+
+  it("replaces the stored ledger path when resuming a gnhf branch with --ledger", async () => {
+    const { orchestratorCtor, ledgerPathContent, tempDir } =
+      await runCliResumeWithActualRun(
+        ["--workflow", "research", "--ledger", "new.jsonl"],
+        undefined,
+        { storedWorkflow: "research", storedLedgerPath: "old.jsonl" },
+      );
+
+    expect(ledgerPathContent).toBe("new.jsonl\n");
+    const runInfoArg = orchestratorCtor.mock.calls[0]![2] as {
+      ledgerPath?: string;
+    };
+    expect(runInfoArg.ledgerPath).toBe(join(tempDir, "new.jsonl"));
   });
 
   it("keeps the stored research workflow when resuming a gnhf branch without --workflow", async () => {

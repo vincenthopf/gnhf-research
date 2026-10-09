@@ -359,6 +359,182 @@ describe("gnhf e2e", () => {
     expect(prompts[1]).toContain("## Research Workflow");
   }, 30_000);
 
+  it("rejects an iteration that rewrites an earlier ledger line and tells the next iteration", async () => {
+    const cwd = createRepo();
+    tempDirs.push(cwd);
+    const logDir = mkdtempSync(join(tmpdir(), "gnhf-e2e-logs-"));
+    tempDirs.push(logDir);
+    const mockLogPath = join(logDir, "mock-claude.jsonl");
+
+    const result = await runCli(
+      cwd,
+      ["study it", "--workflow", "research", "--max-iterations", "3"],
+      {
+        env: {
+          ...createTestEnv(mockLogPath, tempDirs),
+          GNHF_MOCK_CLAUDE_LEDGER: "rewrite-iteration-2",
+        },
+      },
+    );
+
+    expect(result.code).toBe(0);
+    const runDir = dirname(findRunLogPath(cwd));
+    const ledgerPath = join(runDir, "ledger", "records.jsonl");
+    const mockEvents = readJsonLines(mockLogPath);
+    const prompts = mockEvents
+      .filter((entry) => entry.event === "spawn")
+      .map((entry) => String(entry.prompt));
+    const seen = mockEvents.filter((entry) => entry.event === "ledger:seen");
+    expect(prompts).toHaveLength(3);
+    expect(prompts[0]).toContain(`Ledger file: ${ledgerPath}`);
+    expect(seen.map((entry) => entry.iteration)).toEqual([1, 2, 3]);
+    expect(seen[0]!.content).toBe("");
+    const afterIteration1 = String(seen[1]!.content);
+    expect(JSON.parse(afterIteration1.trim())).toMatchObject({
+      id: "r1",
+      claim: "mock claim 1",
+    });
+    expect(seen[2]!.content).toBe(afterIteration1);
+
+    const rejectedPath = join(runDir, "ledger", "rejected-iteration-2.jsonl");
+    expect(readFileSync(rejectedPath, "utf-8")).toContain("rewritten by mock");
+    expect(prompts[1]).not.toContain("## Previous Ledger Rejection");
+    expect(prompts[2]).toContain("## Previous Ledger Rejection");
+    expect(prompts[2]).toContain("line 1 changed (id r1)");
+    expect(prompts[2]).toContain(rejectedPath);
+    expect(readFileSync(ledgerPath, "utf-8")).toBe(
+      `${afterIteration1}${JSON.stringify({ id: "r3", iteration: 3, evidence_origin: "executed", claim: "mock claim 3" })}\n`,
+    );
+    expect(readFileSync(join(runDir, "notes.md"), "utf-8")).toContain(
+      "[FAIL] ledger validation failed: line 1 changed (id r1)",
+    );
+    const events = readJsonLines(join(runDir, "gnhf.log"));
+    expect(events.filter((entry) => entry.event === "ledger:invalid")).toEqual([
+      expect.objectContaining({
+        iteration: 2,
+        reason: "line 1 changed (id r1)",
+        rejectedPath,
+      }),
+    ]);
+    expect(git(["rev-list", "--count", "HEAD"], cwd)).toBe("3");
+  }, 30_000);
+
+  it("rejects a partial ledger line left by a killed run when it resumes", async () => {
+    const cwd = createRepo();
+    tempDirs.push(cwd);
+    const logDir = mkdtempSync(join(tmpdir(), "gnhf-e2e-logs-"));
+    tempDirs.push(logDir);
+    const mockLogPath = join(logDir, "mock-claude.jsonl");
+    const env = {
+      ...createTestEnv(mockLogPath, tempDirs),
+      GNHF_MOCK_CLAUDE_LEDGER: "append",
+    };
+
+    const first = await runCli(
+      cwd,
+      ["study it", "--workflow", "research", "--max-iterations", "1"],
+      { env },
+    );
+    expect(first.code).toBe(0);
+    const runDir = dirname(findRunLogPath(cwd));
+    const ledgerPath = join(runDir, "ledger", "records.jsonl");
+    const afterIteration1 = readFileSync(ledgerPath, "utf-8");
+    const partial = `${afterIteration1}{"id":"r2","itera`;
+    writeFileSync(ledgerPath, partial, "utf-8");
+
+    const resumed = await runCli(cwd, ["--max-iterations", "2"], { env });
+    expect(resumed.code).toBe(0);
+
+    const prompts = readJsonLines(mockLogPath)
+      .filter((entry) => entry.event === "spawn")
+      .map((entry) => String(entry.prompt));
+    const rejectedPath = join(
+      runDir,
+      "ledger",
+      "rejected-before-iteration-2.jsonl",
+    );
+    expect(prompts).toHaveLength(2);
+    expect(prompts[1]).toContain("## Previous Ledger Rejection");
+    expect(prompts[1]).toContain("interrupted");
+    expect(prompts[1]).toContain(rejectedPath);
+    expect(readFileSync(rejectedPath, "utf-8")).toBe(partial);
+    const ids = readFileSync(ledgerPath, "utf-8")
+      .trim()
+      .split("\n")
+      .map((line) => (JSON.parse(line) as { id: string }).id);
+    expect(ids).toEqual(["r1", "r2"]);
+    expect(readFileSync(join(runDir, "notes.md"), "utf-8")).not.toContain(
+      "ledger validation failed",
+    );
+  }, 30_000);
+
+  it("keeps a --ledger path when the run resumes without the flag", async () => {
+    const cwd = createRepo();
+    tempDirs.push(cwd);
+    const logDir = mkdtempSync(join(tmpdir(), "gnhf-e2e-logs-"));
+    tempDirs.push(logDir);
+    const mockLogPath = join(logDir, "mock-claude.jsonl");
+    const env = {
+      ...createTestEnv(mockLogPath, tempDirs),
+      GNHF_MOCK_CLAUDE_LEDGER: "append",
+    };
+
+    const first = await runCli(
+      cwd,
+      [
+        "study it",
+        "--workflow",
+        "research",
+        "--ledger",
+        "research/records.jsonl",
+        "--max-iterations",
+        "1",
+      ],
+      { env },
+    );
+    expect(first.code).toBe(0);
+
+    const resumed = await runCli(cwd, ["--max-iterations", "2"], { env });
+    expect(resumed.code).toBe(0);
+
+    const ledgerPath = join(cwd, "research", "records.jsonl");
+    const prompts = readJsonLines(mockLogPath)
+      .filter((entry) => entry.event === "spawn")
+      .map((entry) => String(entry.prompt));
+    expect(prompts).toHaveLength(2);
+    expect(prompts[1]).toContain(`Ledger file: ${ledgerPath}`);
+    const ids = readFileSync(ledgerPath, "utf-8")
+      .trim()
+      .split("\n")
+      .map((line) => (JSON.parse(line) as { id: string }).id);
+    expect(ids).toEqual(["r1", "r2"]);
+    const runDir = dirname(findRunLogPath(cwd));
+    expect(readFileSync(join(runDir, "ledger-path"), "utf-8")).toBe(
+      "research/records.jsonl\n",
+    );
+    expect(existsSync(join(runDir, "ledger", "records.jsonl"))).toBe(false);
+    expect(git(["show", "HEAD:research/records.jsonl"], cwd)).toContain(
+      '"id":"r2"',
+    );
+  }, 30_000);
+
+  it("rejects --ledger without --workflow research before spawning claude", async () => {
+    const cwd = createRepo();
+    tempDirs.push(cwd);
+    const logDir = mkdtempSync(join(tmpdir(), "gnhf-e2e-logs-"));
+    tempDirs.push(logDir);
+    const mockLogPath = join(logDir, "mock-claude.jsonl");
+
+    const result = await runCli(cwd, ["ship it", "--ledger", "l.jsonl"], {
+      env: createTestEnv(mockLogPath, tempDirs),
+    });
+
+    expect(result.code).toBe(1);
+    expect(result.stderr).toContain("--ledger requires --workflow research");
+    expect(existsSync(mockLogPath)).toBe(false);
+    expect(existsSync(join(cwd, ".gnhf", "runs"))).toBe(false);
+  }, 30_000);
+
   it("leaves research fields out of the default workflow", async () => {
     const cwd = createRepo();
     tempDirs.push(cwd);

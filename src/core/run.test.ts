@@ -55,6 +55,7 @@ const mockGetHeadCommit = vi.mocked(getHeadCommit);
 describe("setupRun", () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    mockExistsSync.mockImplementation(() => false);
     mockExecFileSync.mockReturnValue(".git/info/exclude\n");
   });
 
@@ -339,6 +340,96 @@ describe("setupRun", () => {
     expect(schema.properties.evidence_origin).toBeUndefined();
     expect(schema.required).not.toContain("evidence_origin");
   });
+
+  it("creates an empty default ledger for a research run", () => {
+    const runDir = join(P, ".gnhf", "runs", "run-abc");
+    const info = setupRun("run-abc", "test", "abc123", P, {
+      includeStopField: false,
+      workflow: "research",
+    });
+
+    const ledgerPath = join(runDir, "ledger", "records.jsonl");
+    expect(info.ledgerPath).toBe(ledgerPath);
+    expect(mockMkdirSync).toHaveBeenCalledWith(join(runDir, "ledger"), {
+      recursive: true,
+    });
+    expect(mockWriteFileSync).toHaveBeenCalledWith(ledgerPath, "", "utf-8");
+    expect(mockWriteFileSync).not.toHaveBeenCalledWith(
+      join(runDir, "ledger-path"),
+      expect.any(String),
+      "utf-8",
+    );
+  });
+
+  it("keeps an existing ledger file when setting up a research run", () => {
+    const ledgerPath = join(
+      P,
+      ".gnhf",
+      "runs",
+      "run-abc",
+      "ledger",
+      "records.jsonl",
+    );
+    mockExistsSync.mockImplementation((path) => path === ledgerPath);
+
+    setupRun("run-abc", "test", "abc123", P, {
+      includeStopField: false,
+      workflow: "research",
+    });
+
+    expect(mockWriteFileSync).not.toHaveBeenCalledWith(
+      ledgerPath,
+      expect.any(String),
+      "utf-8",
+    );
+  });
+
+  it("stores a repo-relative --ledger path and resolves it against the repo", () => {
+    const runDir = join(P, ".gnhf", "runs", "run-abc");
+    const info = setupRun("run-abc", "test", "abc123", P, {
+      includeStopField: false,
+      workflow: "research",
+      ledger: "research/records.jsonl",
+    });
+
+    expect(info.ledgerPath).toBe(join(P, "research", "records.jsonl"));
+    expect(mockWriteFileSync).toHaveBeenCalledWith(
+      join(runDir, "ledger-path"),
+      "research/records.jsonl\n",
+      "utf-8",
+    );
+    expect(mockMkdirSync).toHaveBeenCalledWith(join(P, "research"), {
+      recursive: true,
+    });
+    expect(mockWriteFileSync).toHaveBeenCalledWith(
+      join(P, "research", "records.jsonl"),
+      "",
+      "utf-8",
+    );
+  });
+
+  it("uses an absolute --ledger path as given", () => {
+    const info = setupRun("run-abc", "test", "abc123", P, {
+      includeStopField: false,
+      workflow: "research",
+      ledger: "/elsewhere/ledger.jsonl",
+    });
+
+    expect(info.ledgerPath).toBe("/elsewhere/ledger.jsonl");
+  });
+
+  it("creates no ledger in the default workflow", () => {
+    const info = setupRun("run-abc", "test", "abc123", P, {
+      includeStopField: false,
+    });
+
+    expect(info.ledgerPath).toBeUndefined();
+    expect(mockWriteFileSync).not.toHaveBeenCalledWith(
+      expect.stringContaining("records.jsonl"),
+      expect.any(String),
+      "utf-8",
+    );
+  });
 });
 
 describe("writeRunEndState", () => {
@@ -444,6 +535,76 @@ describe("resumeRun", () => {
 
     expect(info.stopWhen).toBe("all tests pass");
     expect(info.stopWhenPath).toBe(stopWhenPath);
+  });
+
+  it("keeps the stored ledger path when resuming without --ledger", () => {
+    const runDir = join(P, ".gnhf", "runs", "run-abc");
+    const workflowPath = join(runDir, "workflow");
+    const ledgerPathFile = join(runDir, "ledger-path");
+    mockExistsSync.mockImplementation(
+      (path) =>
+        path === runDir || path === workflowPath || path === ledgerPathFile,
+    );
+    mockReadFileSync.mockImplementation((path) =>
+      path === workflowPath
+        ? "research\n"
+        : path === ledgerPathFile
+          ? "research/records.jsonl\n"
+          : "",
+    );
+
+    const info = resumeRun("run-abc", P, { includeStopField: false });
+
+    expect(info.ledgerPath).toBe(join(P, "research", "records.jsonl"));
+    expect(mockWriteFileSync).not.toHaveBeenCalledWith(
+      ledgerPathFile,
+      expect.any(String),
+      "utf-8",
+    );
+  });
+
+  it("replaces the stored ledger path when resuming with --ledger", () => {
+    const runDir = join(P, ".gnhf", "runs", "run-abc");
+    const workflowPath = join(runDir, "workflow");
+    const ledgerPathFile = join(runDir, "ledger-path");
+    mockExistsSync.mockImplementation(
+      (path) =>
+        path === runDir || path === workflowPath || path === ledgerPathFile,
+    );
+    mockReadFileSync.mockImplementation((path) =>
+      path === workflowPath
+        ? "research\n"
+        : path === ledgerPathFile
+          ? "old.jsonl\n"
+          : "",
+    );
+
+    const info = resumeRun("run-abc", P, {
+      includeStopField: false,
+      ledger: "new.jsonl",
+    });
+
+    expect(info.ledgerPath).toBe(join(P, "new.jsonl"));
+    expect(mockWriteFileSync).toHaveBeenCalledWith(
+      ledgerPathFile,
+      "new.jsonl\n",
+      "utf-8",
+    );
+  });
+
+  it("uses the default ledger when a research run has no stored ledger path", () => {
+    const runDir = join(P, ".gnhf", "runs", "run-abc");
+    const workflowPath = join(runDir, "workflow");
+    mockExistsSync.mockImplementation(
+      (path) => path === runDir || path === workflowPath,
+    );
+    mockReadFileSync.mockImplementation((path) =>
+      path === workflowPath ? "research\n" : "",
+    );
+
+    const info = resumeRun("run-abc", P, { includeStopField: false });
+
+    expect(info.ledgerPath).toBe(join(runDir, "ledger", "records.jsonl"));
   });
 
   it("keeps the stored research workflow when no workflow is passed", () => {
@@ -831,8 +992,6 @@ describe("getCompletedIterationCount", () => {
   } as Parameters<typeof getCompletedIterationCount>[0];
 
   afterEach(() => {
-    mockExistsSync.mockReset();
-    mockExistsSync.mockReturnValue(false);
     mockReadFileSync.mockReset();
     mockReadFileSync.mockReturnValue("");
   });
@@ -884,13 +1043,12 @@ describe("getInterruptedIteration", () => {
     events.map((event) => JSON.stringify(event)).join("\n");
 
   afterEach(() => {
-    mockExistsSync.mockReset();
-    mockExistsSync.mockReturnValue(false);
     mockReadFileSync.mockReset();
     mockReadFileSync.mockReturnValue("");
   });
 
   it("returns null when the run has no log", () => {
+    mockExistsSync.mockReturnValue(false);
     expect(getInterruptedIteration(runDir)).toBeNull();
     expect(mockReadFileSync).not.toHaveBeenCalled();
   });

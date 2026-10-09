@@ -90,6 +90,35 @@ function applyWorkspaceChange() {
   appendLog("workspace:changed", { marker: marker.trim() });
 }
 
+function applyLedgerChange() {
+  const ledgerMode = process.env.GNHF_MOCK_CLAUDE_LEDGER;
+  if (!ledgerMode) return;
+  const ledgerMatch = /^Ledger file: (.+)$/m.exec(prompt);
+  const iterationMatch = /This is iteration (\d+)\./.exec(prompt);
+  if (!ledgerMatch || !iterationMatch) return;
+  const ledgerPath = ledgerMatch[1];
+  const iteration = Number(iterationMatch[1]);
+  const current = readFileSync(ledgerPath, "utf-8");
+  appendLog("ledger:seen", { iteration, ledgerPath, content: current });
+  if (ledgerMode === "rewrite-iteration-2" && iteration === 2) {
+    const lines = current.split("\n");
+    const first = JSON.parse(lines[0]);
+    lines[0] = JSON.stringify({ ...first, claim: "rewritten by mock" });
+    writeFileSync(ledgerPath, lines.join("\n"), "utf-8");
+    return;
+  }
+  appendFileSync(
+    ledgerPath,
+    `${JSON.stringify({
+      id: `r${iteration}`,
+      iteration,
+      evidence_origin: "executed",
+      claim: `mock claim ${iteration}`,
+    })}\n`,
+    "utf-8",
+  );
+}
+
 function shouldHang() {
   if (prompt.includes("slow cleanup")) return true;
   const hang = process.env.GNHF_MOCK_CLAUDE_HANG_ITERATION;
@@ -161,6 +190,7 @@ if (shouldHang()) {
   if (process.env.GNHF_MOCK_CLAUDE_NO_CHANGES !== "1") {
     applyWorkspaceChange();
   }
+  applyLedgerChange();
   writeResult("mocked objective complete");
   process.exit(0);
 }

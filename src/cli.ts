@@ -134,6 +134,13 @@ function parseWorkflowOption(value: string): Workflow {
   }
 }
 
+function parseLedgerOption(value: string): string {
+  if (value.trim().length === 0) {
+    throw new InvalidArgumentError("must not be empty");
+  }
+  return value;
+}
+
 function parseUntilOption(value: string): Date {
   try {
     return parseUntil(value);
@@ -233,9 +240,13 @@ function buildResumeSchemaOptions(
   stopWhen: string | undefined,
   commitMessage: CommitMessageConfig | undefined,
   workflow: Workflow | undefined,
+  ledger: string | undefined,
 ): RunSchemaOptions {
   const commitFields = getCommitMessageSchemaFields(commitMessage);
-  const workflowOverride = workflow === undefined ? {} : { workflow };
+  const workflowOverride = {
+    ...(workflow === undefined ? {} : { workflow }),
+    ...(ledger === undefined ? {} : { ledger }),
+  };
   if (stopWhen === "") {
     return {
       includeStopField: false,
@@ -692,6 +703,11 @@ program
     parseWorkflowOption,
   )
   .option(
+    "--ledger <path>",
+    "Research ledger file, relative to the repo root or absolute (requires --workflow research); resumes reuse the stored path, pass a value to overwrite it",
+    parseLedgerOption,
+  )
+  .option(
     "--prevent-sleep <mode>",
     'Prevent system sleep during the run ("on" or "off")',
     parseOnOffBoolean,
@@ -731,6 +747,7 @@ program
         fallbackModel?: string;
         stopWhen?: string;
         workflow?: Workflow;
+        ledger?: string;
         preventSleep?: boolean;
         worktree: boolean;
         currentBranch: boolean;
@@ -824,6 +841,19 @@ program
         process.exit(1);
       }
 
+      if (options.ledger !== undefined && options.workflow !== "research") {
+        console.error(
+          "--ledger requires --workflow research. Pass --workflow research with --ledger, also when resuming.",
+        );
+        process.exit(1);
+      }
+      const withLedgerOption = (
+        runSchemaOptions: RunSchemaOptions,
+      ): RunSchemaOptions =>
+        options.ledger === undefined
+          ? runSchemaOptions
+          : { ...runSchemaOptions, ledger: options.ledger };
+
       const cliStopWhen =
         options.stopWhen === "" ? undefined : options.stopWhen;
       let effectiveStopWhen = cliStopWhen;
@@ -853,11 +883,12 @@ program
         const wt = initializeWorktreeRun(
           prompt,
           cwd,
-          schemaOptions,
+          withLedgerOption(schemaOptions),
           buildResumeSchemaOptions(
             options.stopWhen,
             effectiveCommitMessage,
             options.workflow,
+            options.ledger,
           ),
         );
         runInfo = wt.runInfo;
@@ -918,6 +949,7 @@ program
             options.stopWhen,
             effectiveCommitMessage,
             options.workflow,
+            options.ledger,
           ),
         );
 
@@ -932,7 +964,11 @@ program
           );
           startIteration = getLastIterationNumber(existing);
         } else {
-          runInfo = initializeCurrentBranchRun(prompt, cwd, schemaOptions);
+          runInfo = initializeCurrentBranchRun(
+            prompt,
+            cwd,
+            withLedgerOption(schemaOptions),
+          );
         }
       } else if (onGnhfBranch) {
         const existingRunId = currentBranch.slice("gnhf/".length);
@@ -952,6 +988,7 @@ program
               options.stopWhen,
               existingMetadata.commitMessage,
               options.workflow,
+              options.ledger,
             ),
           );
           const resumeStopWhen = existing.stopWhen;
@@ -987,6 +1024,7 @@ program
                 options.stopWhen,
                 existingMetadata.commitMessage,
                 options.workflow,
+                options.ledger,
               ),
             );
             const resumeStopWhen = existing.stopWhen;
@@ -1014,7 +1052,11 @@ program
               effectiveCommitMessage,
               options.workflow,
             );
-            runInfo = initializeNewBranch(prompt, cwd, schemaOptions);
+            runInfo = initializeNewBranch(
+              prompt,
+              cwd,
+              withLedgerOption(schemaOptions),
+            );
           } else {
             process.exit(0);
           }
@@ -1025,7 +1067,11 @@ program
           return;
         }
 
-        runInfo = initializeNewBranch(prompt, cwd, schemaOptions);
+        runInfo = initializeNewBranch(
+          prompt,
+          cwd,
+          withLedgerOption(schemaOptions),
+        );
       }
 
       let sleepPreventionCleanup: (() => Promise<void>) | null = null;
@@ -1116,6 +1162,7 @@ program
         stopWhen: effectiveStopWhen,
         commitMessage: effectiveCommitMessage,
         workflow: runInfo.workflow,
+        ledgerPath: runInfo.ledgerPath,
         preventSleep: config.preventSleep,
         agentArgsOverride: config.agentArgsOverride.claude,
         worktree: options.worktree,

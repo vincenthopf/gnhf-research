@@ -28,6 +28,22 @@ Each iteration continues this cycle. Keep the records in the files the objective
 Repetition is a reason to change approach, not to stop.`;
 }
 
+function buildLedgerSection(ledgerPath: string): string {
+  return `\n\n## Research Ledger
+
+Ledger file: ${ledgerPath}
+
+Record each claim in the ledger as one JSON object per line. Required fields:
+- id: a string, unique across the whole file
+- iteration: this iteration's number, as an integer
+- evidence_origin: executed, source_read, reasoning_only, or none
+- claim: a non-empty string
+
+Optional fields: boundary (what the claim does NOT show), sources, next, and reframes (the id of an earlier record that this record revises). Other fields are allowed.
+
+The ledger is append only. Never edit, reorder or delete an earlier line. To revise a record, append a new record whose reframes field names the earlier id. gnhf checks the ledger before each iteration starts and after each iteration that returns a result. If a line is not a JSON object, a required field is missing or has the wrong type, an id repeats, or an earlier line changed, gnhf saves the rejected ledger to a file, restores the last validated content, fails the iteration that made the change when it returned a result, and states the reason in the next prompt.`;
+}
+
 export function buildIterationPrompt(params: {
   n: number;
   runId: string;
@@ -37,6 +53,7 @@ export function buildIterationPrompt(params: {
   deadline?: string;
   finalIteration?: { reason: string; wrapUpOnly: boolean };
   workflow?: Workflow;
+  ledgerPath?: string;
 }): string {
   const research = params.workflow === "research";
   const outputFields = [
@@ -85,7 +102,12 @@ export function buildIterationPrompt(params: {
         ? `\n\n## Final Iteration\n\nThis is the final iteration of the run: ${params.finalIteration.reason}. Do not start new work. Finish and verify anything left half-done so the tree is in a state worth committing, record what is complete and what is not, and post the final summary or handoff the objective asks for. gnhf stops after this iteration whatever its outcome.`
         : `\n\n## Final Iteration\n\nThis is the final iteration of the run: ${params.finalIteration.reason}. Choose work you can finish and verify in this iteration, then post the final summary or handoff the objective asks for before you submit. gnhf stops after this iteration.`;
 
-  const researchSection = research ? buildResearchSection(params.runId) : "";
+  const researchSection = research
+    ? buildResearchSection(params.runId) +
+      (params.ledgerPath === undefined
+        ? ""
+        : buildLedgerSection(params.ledgerPath))
+    : "";
 
   return `You are working autonomously towards an objective given below.
 This is iteration ${params.n}. Each iteration aims to make an incremental step forward, not to complete the entire objective.

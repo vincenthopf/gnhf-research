@@ -7,7 +7,7 @@ import {
   existsSync,
   rmSync,
 } from "node:fs";
-import { join, dirname, isAbsolute } from "node:path";
+import { join, dirname, isAbsolute, resolve } from "node:path";
 import { execFileSync } from "node:child_process";
 import {
   buildAgentOutputSchema,
@@ -19,6 +19,7 @@ import {
   type CommitMessageConfig,
 } from "./commit-message.js";
 import { findLegacyRunBaseCommit, getHeadCommit } from "./git.js";
+import { defaultLedgerPath } from "./ledger.js";
 import {
   formatResearchEvidence,
   isWorkflow,
@@ -41,6 +42,7 @@ export interface RunInfo {
   commitMessage: CommitMessageConfig | undefined;
   workflowPath: string;
   workflow: Workflow;
+  ledgerPath?: string;
 }
 
 export interface RunMetadata {
@@ -57,6 +59,7 @@ const END_STATE_FILENAME = "end-state.json";
 const STOP_WHEN_FILENAME = "stop-when";
 const COMMIT_MESSAGE_FILENAME = "commit-message";
 const WORKFLOW_FILENAME = "workflow";
+const LEDGER_PATH_FILENAME = "ledger-path";
 
 function writeSchemaFile(
   schemaPath: string,
@@ -84,6 +87,7 @@ export interface RunSchemaOptions {
   stopWhen?: string;
   clearStopWhen?: boolean;
   workflow?: Workflow;
+  ledger?: string;
 }
 
 export interface RunEndState {
@@ -122,6 +126,32 @@ function readWorkflow(workflowPath: string): Workflow {
 
 function writeWorkflow(workflowPath: string, workflow: Workflow): void {
   writeFileSync(workflowPath, `${workflow}\n`, "utf-8");
+}
+
+function resolveRunLedger(
+  runDir: string,
+  cwd: string,
+  workflow: Workflow,
+  ledgerOption: string | undefined,
+): string | undefined {
+  const storedPath = join(runDir, LEDGER_PATH_FILENAME);
+  let configured = ledgerOption;
+  if (configured !== undefined) {
+    writeFileSync(storedPath, `${configured}\n`, "utf-8");
+  } else if (existsSync(storedPath)) {
+    const stored = readFileSync(storedPath, "utf-8").trim();
+    configured = stored.length > 0 ? stored : undefined;
+  }
+  if (workflow !== "research") return undefined;
+  const ledgerPath =
+    configured === undefined
+      ? defaultLedgerPath(runDir)
+      : resolve(cwd, configured);
+  mkdirSync(dirname(ledgerPath), { recursive: true });
+  if (!existsSync(ledgerPath)) {
+    writeFileSync(ledgerPath, "", "utf-8");
+  }
+  return ledgerPath;
 }
 
 function commitMessageMetadataValue(
@@ -271,6 +301,12 @@ export function setupRun(
   const workflowPath = join(runDir, WORKFLOW_FILENAME);
   const workflow = schemaOptions.workflow ?? "default";
   writeWorkflow(workflowPath, workflow);
+  const ledgerPath = resolveRunLedger(
+    runDir,
+    cwd,
+    workflow,
+    schemaOptions.ledger,
+  );
 
   return {
     runId,
@@ -287,6 +323,7 @@ export function setupRun(
     commitMessage,
     workflowPath,
     workflow,
+    ...(ledgerPath === undefined ? {} : { ledgerPath }),
   };
 }
 
@@ -327,6 +364,12 @@ export function resumeRun(
     workflow = schemaOptions.workflow;
     writeWorkflow(workflowPath, workflow);
   }
+  const ledgerPath = resolveRunLedger(
+    runDir,
+    cwd,
+    workflow,
+    schemaOptions.ledger,
+  );
   writeSchemaFile(schemaPath, {
     ...schemaOptions,
     workflow,
@@ -350,6 +393,7 @@ export function resumeRun(
     commitMessage,
     workflowPath,
     workflow,
+    ...(ledgerPath === undefined ? {} : { ledgerPath }),
   };
 }
 

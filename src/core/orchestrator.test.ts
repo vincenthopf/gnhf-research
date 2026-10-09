@@ -1,4 +1,13 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
+import {
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 
 vi.mock("./git.js", async (importOriginal) => {
   const actual = await importOriginal<typeof import("./git.js")>();
@@ -3347,5 +3356,489 @@ describe("Orchestrator research workflow", () => {
       ([event]) => event === "iteration:end",
     );
     expect(endCall![1]).not.toHaveProperty("evidenceOrigin");
+  });
+});
+
+describe("Orchestrator research ledger", () => {
+  const usage = {
+    inputTokens: 0,
+    outputTokens: 0,
+    cacheReadTokens: 0,
+    cacheCreationTokens: 0,
+  };
+  const r1 = `${JSON.stringify({ id: "r1", iteration: 1, evidence_origin: "executed", claim: "cache halves cold start" })}\n`;
+  const r1Rewritten = `${JSON.stringify({ id: "r1", iteration: 1, evidence_origin: "executed", claim: "rewritten" })}\n`;
+  const r2 = `${JSON.stringify({ id: "r2", iteration: 2, evidence_origin: "source_read", claim: "paper agrees" })}\n`;
+  let dir: string;
+  let ledgerInfo: RunInfo;
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    vi.useRealTimers();
+    mockCommitAll.mockReturnValue(true);
+    dir = mkdtempSync(join(tmpdir(), "gnhf-ledger-"));
+    const runDir = join(dir, ".gnhf", "runs", "run-abc");
+    mkdirSync(join(runDir, "ledger"), { recursive: true });
+    ledgerInfo = {
+      ...runInfo,
+      runDir,
+      workflow: "research",
+      ledgerPath: join(runDir, "ledger", "records.jsonl"),
+    };
+    writeFileSync(ledgerInfo.ledgerPath!, r1, "utf-8");
+  });
+
+  afterEach(() => {
+    mockResetHard.mockReset();
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  function ledgerAgent(
+    steps: Array<{
+      ledger: (current: string) => string;
+      success?: boolean;
+      stop?: boolean;
+    }>,
+  ): Agent {
+    let call = 0;
+    return {
+      name: "claude",
+      run: vi.fn(async () => {
+        const step = steps[Math.min(call, steps.length - 1)]!;
+        call++;
+        const path = ledgerInfo.ledgerPath!;
+        writeFileSync(path, step.ledger(readFileSync(path, "utf-8")), "utf-8");
+        return {
+          output: {
+            success: step.success ?? true,
+            summary: "studied cache",
+            key_changes_made: ["ledger"],
+            key_learnings: ["learning"],
+            evidence_origin: "executed" as const,
+            goals_changed: [],
+            contracts_run: [],
+            boundary: "b",
+            ...(step.stop === undefined
+              ? {}
+              : { should_fully_stop: step.stop }),
+          },
+          usage,
+        };
+      }),
+    };
+  }
+
+  const validatedPath = () =>
+    join(ledgerInfo.runDir, "ledger", "validated.jsonl");
+
+  function orchestratorFor(agent: Agent, maxIterations: number): Orchestrator {
+    return new Orchestrator(config, agent, ledgerInfo, "study it", dir, 0, {
+      maxIterations,
+    });
+  }
+
+  it("passes the ledger path to the iteration prompt", async () => {
+    await orchestratorFor(ledgerAgent([{ ledger: (c) => c }]), 1).start();
+
+    expect(vi.mocked(buildIterationPrompt)).toHaveBeenCalledWith(
+      expect.objectContaining({ ledgerPath: ledgerInfo.ledgerPath }),
+    );
+  });
+
+  it("commits an iteration that appends valid records", async () => {
+    const orchestrator = orchestratorFor(
+      ledgerAgent([{ ledger: (c) => c + r2 }]),
+      1,
+    );
+
+    await orchestrator.start();
+
+    expect(orchestrator.getState().iterations[0]!.success).toBe(true);
+    expect(mockCommitAll).toHaveBeenCalledTimes(1);
+    expect(readFileSync(ledgerInfo.ledgerPath!, "utf-8")).toBe(r1 + r2);
+    expect(mockAppendDebugLog).toHaveBeenCalledWith(
+      "ledger:valid",
+      expect.objectContaining({ iteration: 1, records: 2 }),
+    );
+  });
+
+  it("fails an iteration that rewrites an earlier line and restores the ledger", async () => {
+    const orchestrator = orchestratorFor(
+      ledgerAgent([{ ledger: () => r1Rewritten + r2 }]),
+      1,
+    );
+
+    await orchestrator.start();
+
+    const record = orchestrator.getState().iterations[0]!;
+    expect(record.success).toBe(false);
+    expect(record.summary).toBe(
+      "ledger validation failed: line 1 changed (id r1)",
+    );
+    expect(mockCommitAll).not.toHaveBeenCalled();
+    expect(mockResetHard).toHaveBeenCalledTimes(1);
+    expect(readFileSync(ledgerInfo.ledgerPath!, "utf-8")).toBe(r1);
+    const rejectedPath = join(
+      ledgerInfo.runDir,
+      "ledger",
+      "rejected-iteration-1.jsonl",
+    );
+    expect(readFileSync(rejectedPath, "utf-8")).toBe(r1Rewritten + r2);
+    expect(mockAppendNotes).toHaveBeenCalledWith(
+      ledgerInfo.notesPath,
+      1,
+      "[FAIL] ledger validation failed: line 1 changed (id r1)",
+      [],
+      expect.arrayContaining([
+        "Agent reported success: studied cache",
+        `Rejected ledger saved to ${rejectedPath}`,
+      ]),
+      expect.objectContaining({ evidenceOrigin: "executed" }),
+    );
+    expect(mockAppendDebugLog).toHaveBeenCalledWith(
+      "ledger:invalid",
+      expect.objectContaining({
+        iteration: 1,
+        reason: "line 1 changed (id r1)",
+        rejectedPath,
+      }),
+    );
+    expect(orchestrator.getState().lastAgentError).toBeNull();
+  });
+
+  it("restores the snapshot after resetHard reverts or removes the ledger", async () => {
+    mockResetHard.mockImplementation(() => {
+      rmSync(ledgerInfo.ledgerPath!, { force: true });
+    });
+    const orchestrator = orchestratorFor(
+      ledgerAgent([{ ledger: () => r2 }]),
+      1,
+    );
+
+    await orchestrator.start();
+
+    expect(orchestrator.getState().iterations[0]!.summary).toBe(
+      "ledger validation failed: line 1 changed (id r1)",
+    );
+    expect(readFileSync(ledgerInfo.ledgerPath!, "utf-8")).toBe(r1);
+  });
+
+  it("tells the next iteration why the ledger was rejected, once", async () => {
+    const agent = ledgerAgent([
+      { ledger: () => r1Rewritten },
+      { ledger: (c) => c + r2 },
+      { ledger: (c) => c },
+    ]);
+
+    await orchestratorFor(agent, 3).start();
+
+    const prompts = vi
+      .mocked(agent.run)
+      .mock.calls.map((call) => String(call[0]));
+    expect(prompts[0]).not.toContain("## Previous Ledger Rejection");
+    expect(prompts[1]).toContain("## Previous Ledger Rejection");
+    expect(prompts[1]).toContain("line 1 changed (id r1)");
+    expect(prompts[1]).toContain(
+      join(ledgerInfo.runDir, "ledger", "rejected-iteration-1.jsonl"),
+    );
+    expect(prompts[2]).not.toContain("## Previous Ledger Rejection");
+    expect(readFileSync(ledgerInfo.ledgerPath!, "utf-8")).toBe(r1 + r2);
+  });
+
+  it("rejects an invalid ledger from a reported failure", async () => {
+    const orchestrator = orchestratorFor(
+      ledgerAgent([{ ledger: (c) => `${c}not json\n`, success: false }]),
+      1,
+    );
+
+    await orchestrator.start();
+
+    expect(orchestrator.getState().iterations[0]!.summary).toBe(
+      "ledger validation failed: line 2 is not valid JSON",
+    );
+    expect(readFileSync(ledgerInfo.ledgerPath!, "utf-8")).toBe(r1);
+    expect(
+      readFileSync(
+        join(ledgerInfo.runDir, "ledger", "rejected-iteration-1.jsonl"),
+        "utf-8",
+      ),
+    ).toBe(`${r1}not json\n`);
+  });
+
+  it("keeps valid records from a reported failure even when resetHard reverts the ledger", async () => {
+    mockResetHard.mockImplementation(() => {
+      writeFileSync(ledgerInfo.ledgerPath!, r1, "utf-8");
+    });
+    const orchestrator = orchestratorFor(
+      ledgerAgent([{ ledger: (c) => c + r2, success: false }]),
+      1,
+    );
+
+    await orchestrator.start();
+
+    expect(orchestrator.getState().iterations[0]!.summary).toBe(
+      "studied cache",
+    );
+    expect(mockResetHard).toHaveBeenCalledTimes(1);
+    expect(readFileSync(ledgerInfo.ledgerPath!, "utf-8")).toBe(r1 + r2);
+  });
+
+  it("rejects an invalid ledger left by an agent error", async () => {
+    mockResetHard.mockImplementation(() => {
+      rmSync(ledgerInfo.ledgerPath!, { force: true });
+    });
+    const agent: Agent = {
+      name: "claude",
+      run: vi.fn(async () => {
+        writeFileSync(ledgerInfo.ledgerPath!, r2, "utf-8");
+        throw new Error("agent crashed");
+      }),
+    };
+    const orchestrator = orchestratorFor(agent, 1);
+
+    await orchestrator.start();
+
+    expect(orchestrator.getState().iterations[0]!.summary).toBe(
+      "agent crashed",
+    );
+    expect(readFileSync(ledgerInfo.ledgerPath!, "utf-8")).toBe(r1);
+    expect(
+      readFileSync(
+        join(ledgerInfo.runDir, "ledger", "rejected-iteration-1.jsonl"),
+        "utf-8",
+      ),
+    ).toBe(r2);
+    expect(
+      mockAppendDebugLog.mock.calls.some(
+        ([event]) => event === "ledger:restored",
+      ),
+    ).toBe(false);
+  });
+
+  it("counts a ledger rejection as no progress, not as an agent error", async () => {
+    const orchestrator = orchestratorFor(
+      ledgerAgent([{ ledger: () => r1Rewritten }]),
+      1,
+    );
+
+    await orchestrator.start();
+
+    const state = orchestrator.getState();
+    expect(state.failCount).toBe(1);
+    expect(state.consecutiveFailures).toBe(1);
+    expect(state.consecutiveErrors).toBe(0);
+  });
+
+  it("does not read or validate a ledger outside research mode", async () => {
+    const agent = ledgerAgent([{ ledger: () => r1Rewritten }]);
+    const orchestrator = new Orchestrator(
+      config,
+      agent,
+      { ...ledgerInfo, workflow: "default", ledgerPath: undefined },
+      "ship it",
+      dir,
+      0,
+      { maxIterations: 1 },
+    );
+
+    await orchestrator.start();
+
+    expect(orchestrator.getState().iterations[0]!.success).toBe(true);
+    expect(
+      mockAppendDebugLog.mock.calls.some(([event]) =>
+        String(event).startsWith("ledger:"),
+      ),
+    ).toBe(false);
+  });
+
+  it("records the validated ledger beside the run", async () => {
+    await orchestratorFor(ledgerAgent([{ ledger: (c) => c + r2 }]), 1).start();
+
+    expect(readFileSync(validatedPath(), "utf-8")).toBe(r1 + r2);
+  });
+
+  it("never overwrites an earlier rejected file", async () => {
+    const earlier = join(
+      ledgerInfo.runDir,
+      "ledger",
+      "rejected-iteration-1.jsonl",
+    );
+    writeFileSync(earlier, "earlier rejection", "utf-8");
+
+    await orchestratorFor(
+      ledgerAgent([{ ledger: () => r1Rewritten }]),
+      1,
+    ).start();
+
+    expect(readFileSync(earlier, "utf-8")).toBe("earlier rejection");
+    expect(
+      readFileSync(
+        join(ledgerInfo.runDir, "ledger", "rejected-iteration-1-2.jsonl"),
+        "utf-8",
+      ),
+    ).toBe(r1Rewritten);
+  });
+
+  it("ignores should_fully_stop from an iteration whose ledger was rejected", async () => {
+    const agent = ledgerAgent([
+      { ledger: () => r1Rewritten, stop: true },
+      { ledger: (c) => c + r2 },
+    ]);
+    const orchestrator = new Orchestrator(
+      config,
+      agent,
+      ledgerInfo,
+      "study it",
+      dir,
+      0,
+      { maxIterations: 2, stopWhen: "done" },
+    );
+
+    await orchestrator.start();
+
+    expect(agent.run).toHaveBeenCalledTimes(2);
+    expect(orchestrator.getState().iterations[1]!.success).toBe(true);
+  });
+
+  it("rejects a partial line left by an aborted iteration at the next start instead of failing every iteration", async () => {
+    const partial = `${r1}{"id":"r2","itera`;
+    const aborting: Agent = {
+      name: "claude",
+      run: vi.fn(async () => {
+        writeFileSync(ledgerInfo.ledgerPath!, partial, "utf-8");
+        throw new PermanentAgentError("auth failed", "auth failed");
+      }),
+    };
+    await orchestratorFor(aborting, 3).start();
+
+    const record = (id: string) =>
+      `${JSON.stringify({ id, iteration: 1, evidence_origin: "none", claim: id })}\n`;
+    const agent = ledgerAgent([
+      { ledger: (c) => c + r2 },
+      { ledger: (c) => c + record("r3") },
+      { ledger: (c) => c + record("r4") },
+    ]);
+    const later = orchestratorFor(agent, 3);
+    await later.start();
+
+    const iterations = later.getState().iterations;
+    expect(iterations.map((record) => record.success)).toEqual([
+      true,
+      true,
+      true,
+    ]);
+    const rejectedPath = join(
+      ledgerInfo.runDir,
+      "ledger",
+      "rejected-before-iteration-1.jsonl",
+    );
+    expect(readFileSync(rejectedPath, "utf-8")).toBe(partial);
+    const prompts = vi
+      .mocked(agent.run)
+      .mock.calls.map((call) => String(call[0]));
+    expect(prompts[0]).toContain("## Previous Ledger Rejection");
+    expect(prompts[0]).toContain("interrupted");
+    expect(prompts[0]).toContain(rejectedPath);
+    expect(prompts[1]).not.toContain("## Previous Ledger Rejection");
+    expect(mockAppendDebugLog).toHaveBeenCalledWith(
+      "ledger:invalid",
+      expect.objectContaining({ iteration: 1, rejectedPath }),
+    );
+    expect(readFileSync(ledgerInfo.ledgerPath!, "utf-8")).toBe(
+      r1 + r2 + record("r3") + record("r4"),
+    );
+  });
+
+  it("keeps valid records from a reported failure when a later iteration aborts and resetHard reverts the ledger", async () => {
+    mockResetHard.mockImplementation(() => {
+      writeFileSync(ledgerInfo.ledgerPath!, r1, "utf-8");
+    });
+    let call = 0;
+    const agent: Agent = {
+      name: "claude",
+      run: vi.fn(async () => {
+        call++;
+        if (call === 2) {
+          throw new PermanentAgentError("auth failed", "auth failed");
+        }
+        writeFileSync(ledgerInfo.ledgerPath!, r1 + r2, "utf-8");
+        return {
+          output: {
+            success: false,
+            summary: "dead end",
+            key_changes_made: [],
+            key_learnings: [],
+            evidence_origin: "executed" as const,
+            goals_changed: [],
+            contracts_run: [],
+            boundary: "b",
+          },
+          usage,
+        };
+      }),
+    };
+    const orchestrator = orchestratorFor(agent, 3);
+
+    await orchestrator.start();
+
+    expect(orchestrator.getState().status).toBe("aborted");
+    expect(readFileSync(ledgerInfo.ledgerPath!, "utf-8")).toBe(r1 + r2);
+    expect(readFileSync(validatedPath(), "utf-8")).toBe(r1 + r2);
+    expect(mockAppendDebugLog).toHaveBeenCalledWith(
+      "ledger:restored",
+      expect.anything(),
+    );
+  });
+
+  it("accepts valid records left by an aborted iteration without a rejection", async () => {
+    const aborting: Agent = {
+      name: "claude",
+      run: vi.fn(async () => {
+        writeFileSync(ledgerInfo.ledgerPath!, r1 + r2, "utf-8");
+        throw new PermanentAgentError("auth failed", "auth failed");
+      }),
+    };
+    await orchestratorFor(aborting, 1).start();
+    const r3 = `${JSON.stringify({ id: "r3", iteration: 1, evidence_origin: "none", claim: "c3" })}\n`;
+    const agent = ledgerAgent([{ ledger: (c) => c + r3 }]);
+
+    await orchestratorFor(agent, 1).start();
+
+    expect(String(vi.mocked(agent.run).mock.calls[0]![0])).not.toContain(
+      "## Previous Ledger Rejection",
+    );
+    expect(readFileSync(ledgerInfo.ledgerPath!, "utf-8")).toBe(r1 + r2 + r3);
+  });
+
+  it("restores the validated ledger after a stop resets the workspace", async () => {
+    mockResetHard.mockImplementation(() => {
+      rmSync(ledgerInfo.ledgerPath!, { force: true });
+    });
+    let started!: () => void;
+    const running = new Promise<void>((resolve) => {
+      started = resolve;
+    });
+    const agent: Agent = {
+      name: "claude",
+      run: vi.fn(
+        (_prompt, _cwd, options) =>
+          new Promise<AgentResult>((_resolve, reject) => {
+            writeFileSync(ledgerInfo.ledgerPath!, r1 + r2, "utf-8");
+            options?.signal?.addEventListener("abort", () =>
+              reject(new Error("Agent was aborted")),
+            );
+            started();
+          }),
+      ),
+    };
+    const orchestrator = orchestratorFor(agent, 1);
+
+    const done = orchestrator.start();
+    await running;
+    orchestrator.stop();
+    await done;
+
+    expect(mockResetHard).toHaveBeenCalled();
+    expect(readFileSync(ledgerInfo.ledgerPath!, "utf-8")).toBe(r1);
   });
 });

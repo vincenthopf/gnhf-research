@@ -297,4 +297,59 @@ describe("buildIterationPrompt workflow", () => {
       "Do not start new work",
     );
   });
+  it("states the ledger path and record format in research mode", () => {
+    const result = buildIterationPrompt({
+      ...base,
+      workflow: "research",
+      ledgerPath: "/repo/.gnhf/runs/r/ledger/records.jsonl",
+    });
+    const section = result.slice(
+      result.indexOf("## Research Ledger"),
+      result.indexOf("## Objective"),
+    );
+    expect(result.indexOf("## Research Ledger")).toBeGreaterThan(
+      result.indexOf("## Research Workflow"),
+    );
+    expect(section).toContain(
+      "Ledger file: /repo/.gnhf/runs/r/ledger/records.jsonl",
+    );
+    expect(section).toContain("one JSON object per line");
+    expect(section).toContain("- id: a string, unique across the whole file");
+    expect(section).toContain("- iteration: ");
+    expect(section).toContain(
+      "- evidence_origin: executed, source_read, reasoning_only, or none",
+    );
+    expect(section).toContain("- claim: a non-empty string");
+    expect(section).toContain("Optional fields: boundary");
+    expect(section).toContain("reframes");
+    expect(section).toContain("append only");
+    expect(section).toContain("Never edit, reorder or delete an earlier line");
+    expect(section).toContain(
+      "gnhf checks the ledger before each iteration starts and after each iteration that returns a result",
+    );
+    expect(section).not.toContain(
+      "After each iteration gnhf checks the ledger",
+    );
+  });
+
+  it("places the ledger section before the stop condition", () => {
+    const result = buildIterationPrompt({
+      ...base,
+      workflow: "research",
+      ledgerPath: "/l.jsonl",
+      stopWhen: "done",
+    });
+    expect(result.indexOf("## Research Ledger")).toBeLessThan(
+      result.indexOf("## Stop Condition"),
+    );
+  });
+
+  it("omits the ledger section without a ledger path or outside research mode", () => {
+    expect(
+      buildIterationPrompt({ ...base, workflow: "research" }),
+    ).not.toContain("## Research Ledger");
+    expect(
+      buildIterationPrompt({ ...base, ledgerPath: "/l.jsonl" }),
+    ).not.toContain("## Research Ledger");
+  });
 });

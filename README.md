@@ -162,7 +162,7 @@ After installing from npm, the skill is available under the installed package di
 - **Graceful interrupts** - in the interactive TUI, the first Ctrl+C requests a graceful stop and lets the current iteration finish (or ends backoff early), the second Ctrl+C force-stops immediately, and `SIGTERM` also force-stops immediately
 - **Exit summary** - after shutdown cleanup, gnhf prints a permanent stdout summary with the final branch, elapsed time, iteration and token totals, branch diff stats, notes/debug-log paths, and review commands
 - **Shared memory** - the agent reads `notes.md` (built up from prior iterations) to communicate across iterations
-- **Local run metadata** - gnhf stores prompt, notes, stop conditions, commit-message convention metadata, the workflow, and a final `end-state.json` sidecar with the exit status, stop condition, agent error, and counters under `.gnhf/runs/`, and ignores it locally, so your branch only contains intentional work
+- **Local run metadata** - gnhf stores prompt, notes, stop conditions, commit-message convention metadata, the workflow, the default research ledger, the ledger path, and a final `end-state.json` sidecar with the exit status, stop condition, agent error, and counters under `.gnhf/runs/`, and ignores it locally, so your branch only contains intentional work
 - **Resume support** - run `gnhf` while on an existing `gnhf/` branch to pick up where a previous run left off; if you provide a different prompt, gnhf asks whether to update the saved prompt and continue with the existing history, start a new branch, or quit. New runs whose generated branch already exists use a numeric suffix such as `gnhf/<slug>-1`. If gnhf was killed mid-iteration (crash, reboot, `SIGKILL`), resuming in any mode first commits every uncommitted change in the working tree as `gnhf <n>: wip from interrupted iteration, recovered on resume`, without running pre-commit hooks, and notes it in the run's `notes.md`. That includes edits you made after the crash. Iteration numbering then continues after it.
 
 ### Live Branch Mode
@@ -210,6 +210,22 @@ For each iteration where the agent returned output, whether it succeeded or repo
 
 The workflow is saved in `.gnhf/runs/<runId>/workflow`. Resuming without `--workflow` keeps the saved workflow. Passing `--workflow` on resume replaces it and rewrites the output schema.
 
+#### Research ledger
+
+Research runs keep a ledger at `.gnhf/runs/<runId>/ledger/records.jsonl`, created empty at setup and ignored by git like the rest of the run directory. `--ledger <path>` (relative to the repo root, or absolute) puts it elsewhere, for example a file committed on the branch. `--ledger` requires `--workflow research`, also on resume. The chosen path is saved in `.gnhf/runs/<runId>/ledger-path`, and resuming without `--ledger` keeps it.
+
+The prompt gives the agent the ledger's absolute path and the record format. Each line is one JSON object with:
+
+- `id`: string, unique across the file
+- `iteration`: integer
+- `evidence_origin`: `executed`, `source_read`, `reasoning_only`, or `none`
+- `claim`: non-empty string
+- optional `boundary` (string), `reframes` (the `id` of an earlier record), `sources`, `next`, and any other fields
+
+The ledger is append only. To revise a record, the agent appends a new record whose `reframes` names it. gnhf keeps the last validated content in `.gnhf/runs/<runId>/ledger/validated.jsonl`. After each iteration that returns output or ends in an agent error, gnhf checks the ledger against that content: every non-empty line must parse as an object with the required fields, ids must be unique, and earlier lines must be unchanged. If the check fails, gnhf saves the agent's ledger to `.gnhf/runs/<runId>/ledger/rejected-iteration-<n>.jsonl` (never overwriting an earlier file), restores the validated content, fails the iteration (its code changes roll back as for any reported failure, and its `should_fully_stop` is ignored), and tells the next iteration the reason, for example `ledger validation failed: line 2 changed (id r1)`.
+
+Iterations that end without a result (aborted, stopped, rate-limited or killed) are not checked when they end. When the run ends and before each iteration, gnhf compares the ledger with the validated copy: valid appends are accepted and lines removed by a git rollback are restored. Any other change is handled before the next iteration, which may be in a resumed run: gnhf saves it to `rejected-before-iteration-<n>.jsonl`, restores the validated content and reports the reason in that iteration's prompt. Valid records from an iteration that reports failure are kept, also in a ledger tracked by git, where they stay uncommitted until the next successful iteration.
+
 ## CLI Reference
 
 | Command                   | Description                                     |
@@ -233,6 +249,7 @@ If you run `gnhf` on an existing `gnhf/` branch with a different prompt, gnhf as
 | `--until <time>`                   | Wrap up and stop at a local time (`17:30` for its next occurrence, or `2026-10-11T06:00`)                     | none                                |
 | `--stop-when <cond>`               | End when the agent reports this condition, after any commit-failure repair; persists across resume            | unlimited                           |
 | `--workflow <name>`                | Iteration workflow (`default` or `research`); persists across resume                                          | `default`                           |
+| `--ledger <path>`                  | Research ledger file, repo-relative or absolute; requires `--workflow research`; persists across resume       | `.gnhf/runs/<runId>/ledger/`        |
 | `--prevent-sleep <mode>`           | Prevent system sleep during the run (`on`/`off` or `true`/`false`)                                            | config file (`on`)                  |
 | `--worktree`                       | Run in a separate git worktree (enables multiple agents concurrently)                                         | `false`                             |
 | `--current-branch`                 | Run on the current branch instead of creating a `gnhf/` branch                                                | `false`                             |
@@ -289,7 +306,7 @@ preventSleep: true
 ```
 
 CLI flags override config file values. `--prevent-sleep` accepts `on`/`off` as well as `true`/`false`; the config file always uses a boolean.
-The iteration, token, and rate-limit-wait caps are runtime-only flags and are not persisted in `config.yml`; `--stop-when` and `--workflow` are persisted per run for resume, but not in config.
+The iteration, token, and rate-limit-wait caps are runtime-only flags and are not persisted in `config.yml`; `--stop-when`, `--workflow` and `--ledger` are persisted per run for resume, but not in config.
 
 `effort` sets Claude's reasoning effort for every iteration and is passed as `claude --effort <level>`. Valid levels are `low`, `medium`, `high`, `xhigh`, and `max`; the default is `medium`, and `--effort` overrides it for a single run without changing `config.yml`.
 

@@ -1,5 +1,6 @@
 import { EventEmitter } from "node:events";
-import { join } from "node:path";
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { dirname, join } from "node:path";
 import {
   PermanentAgentError,
   RateLimitAgentError,
@@ -29,6 +30,14 @@ import {
 } from "./interrupt-state.js";
 import { buildCommitMessage } from "./commit-message.js";
 import { formatDeadline } from "./deadline.js";
+import {
+  isLinePrefix,
+  longestValidPrefix,
+  readLedger,
+  validateLedger,
+  validatedLedgerPath,
+  writeRejectedLedger,
+} from "./ledger.js";
 import { buildIterationPrompt } from "../templates/iteration-prompt.js";
 import { getTotalTokenCount } from "../utils/tokens.js";
 import type { ResearchEvidence } from "./workflow.js";
@@ -121,6 +130,17 @@ type ProviderResumeWait =
   | { kind: "elapsed"; resumeAt: Date }
   | { kind: "wait"; resumeAt: Date; waitMs: number; truncated: boolean };
 
+interface LedgerRejection {
+  reason: string;
+  rejectedPath: string;
+  source: "iteration" | "interrupted";
+}
+
+interface LedgerCheck {
+  keep: string;
+  rejection?: LedgerRejection;
+}
+
 type RunIterationResult =
   | {
       type: "completed";
@@ -145,6 +165,8 @@ export class Orchestrator extends EventEmitter<OrchestratorEvents> {
   private activeAbortController: AbortController | null = null;
   private pendingAbortReason: string | null = null;
   private pendingCommitFailure: string | null = null;
+  private pendingLedgerRejection: LedgerRejection | null = null;
+  private ledgerBaseline: string | undefined = undefined;
   private wrapUpStopReason: string | null = null;
   private noProgressStreak = 0;
   private activeIterationTokensEstimated = false;
@@ -338,6 +360,7 @@ export class Orchestrator extends EventEmitter<OrchestratorEvents> {
         this.emit("iteration:start", this.state.currentIteration);
         this.emit("state", this.getState());
 
+        this.ledgerBaseline = this.reconcileLedger(true);
         const finalIteration = this.getFinalIteration();
         this.wrapUpStopReason = finalIteration?.stopReason ?? null;
         const baseIterationPrompt = buildIterationPrompt({
@@ -347,6 +370,9 @@ export class Orchestrator extends EventEmitter<OrchestratorEvents> {
           stopWhen: this.limits.stopWhen,
           commitMessage: this.config.commitMessage,
           workflow: this.runInfo.workflow,
+          ...(this.runInfo.ledgerPath === undefined
+            ? {}
+            : { ledgerPath: this.runInfo.ledgerPath }),
           ...(this.limits.until === undefined
             ? {}
             : { deadline: formatDeadline(this.limits.until) }),
@@ -359,9 +385,11 @@ export class Orchestrator extends EventEmitter<OrchestratorEvents> {
                 },
               }),
         });
-        const iterationPrompt = this.pendingCommitFailure
-          ? this.buildCommitRepairPrompt(baseIterationPrompt)
-          : baseIterationPrompt;
+        const iterationPrompt = this.withLedgerRejection(
+          this.pendingCommitFailure
+            ? this.buildCommitRepairPrompt(baseIterationPrompt)
+            : baseIterationPrompt,
+        );
 
         appendDebugLog("iteration:start", {
           iteration: this.state.currentIteration,
@@ -602,6 +630,7 @@ export class Orchestrator extends EventEmitter<OrchestratorEvents> {
       } else {
         await this.closeAgent();
       }
+      this.reconcileLedger(false);
       this.loopDone = true;
       if (this.didStopWithoutForce()) {
         this.emitStopped();
@@ -678,6 +707,7 @@ export class Orchestrator extends EventEmitter<OrchestratorEvents> {
       ? this.limits.fallbackModel
       : undefined;
     this.fallbackModelActive = false;
+    const ledgerSnapshot = this.ledgerBaseline;
 
     try {
       const result = await this.agent.run(prompt, this.cwd, {
@@ -720,6 +750,16 @@ export class Orchestrator extends EventEmitter<OrchestratorEvents> {
       }
 
       const shouldFullyStop = result.output.should_fully_stop === true;
+      const ledger = this.checkLedger(ledgerSnapshot);
+
+      if (ledger?.rejection !== undefined) {
+        const record = this.recordLedgerRejection(
+          result.output,
+          ledger.rejection,
+        );
+        this.settleLedger(ledger);
+        return { type: "completed", record, shouldFullyStop: false };
+      }
 
       if (result.output.success) {
         const record = this.recordSuccess(result.output);
@@ -734,17 +774,15 @@ export class Orchestrator extends EventEmitter<OrchestratorEvents> {
           ...(abortReason === undefined ? {} : { abortReason }),
         };
       }
-      return {
-        type: "completed",
-        record: this.recordFailure(
-          `[FAIL] ${result.output.summary}`,
-          result.output.summary,
-          toStringArray(result.output.key_learnings),
-          "reported",
-          this.researchEvidence(result.output),
-        ),
-        shouldFullyStop,
-      };
+      const failure = this.recordFailure(
+        `[FAIL] ${result.output.summary}`,
+        result.output.summary,
+        toStringArray(result.output.key_learnings),
+        "reported",
+        this.researchEvidence(result.output),
+      );
+      this.settleLedger(ledger);
+      return { type: "completed", record: failure, shouldFullyStop };
     } catch (err) {
       const elapsedMs = Date.now() - agentStartedAt;
       if (this.activeIterationTokensEstimated) {
@@ -807,11 +845,17 @@ export class Orchestrator extends EventEmitter<OrchestratorEvents> {
       }
 
       const summary = err instanceof Error ? err.message : String(err);
-      return {
-        type: "completed",
-        record: this.recordFailure(`[ERROR] ${summary}`, summary, [], "error"),
-        shouldFullyStop: false,
-      };
+      const ledger = this.checkLedger(ledgerSnapshot);
+      const record = this.recordFailure(
+        `[ERROR] ${summary}`,
+        summary,
+        ledger?.rejection === undefined
+          ? []
+          : [this.rejectedLedgerLearning(ledger.rejection)],
+        "error",
+      );
+      this.settleLedger(ledger);
+      return { type: "completed", record, shouldFullyStop: false };
     } finally {
       this.activeAbortController = null;
       this.pendingAbortReason = null;
@@ -892,6 +936,149 @@ Git commit output:
 \`\`\`
 ${this.pendingCommitFailure}
 \`\`\``;
+  }
+
+  private withLedgerRejection(prompt: string): string {
+    const rejection = this.pendingLedgerRejection;
+    if (rejection === null) return prompt;
+    const origin =
+      rejection.source === "iteration"
+        ? `gnhf rejected the ledger written by the previous iteration: ${rejection.reason}.
+That iteration was marked failed, and the ledger was restored to its content from before that iteration.`
+        : `gnhf rejected ledger changes left by an interrupted earlier iteration (aborted, stopped, rate-limited or crashed): ${rejection.reason}.
+The ledger was restored to its last validated content.`;
+    return `${prompt}
+
+## Previous Ledger Rejection
+
+${origin}
+The rejected ledger is saved at ${rejection.rejectedPath}. Earlier lines must stay unchanged and every line must be a valid record. Append any records from the rejected file that are still valid as new lines.`;
+  }
+
+  private checkLedger(snapshot: string | undefined): LedgerCheck | undefined {
+    const ledgerPath = this.runInfo.ledgerPath;
+    if (ledgerPath === undefined || snapshot === undefined) return undefined;
+    const iteration = this.state.currentIteration;
+    const content = readLedger(ledgerPath);
+    const validation = validateLedger(snapshot, content);
+    this.pendingLedgerRejection = null;
+    if (validation.valid) {
+      appendDebugLog("ledger:valid", {
+        iteration,
+        records: validation.records,
+        appendedBytes: content.length - snapshot.length,
+      });
+      this.writeValidatedLedger(content);
+      return { keep: content };
+    }
+    const rejectedPath = writeRejectedLedger(
+      this.runInfo.runDir,
+      `rejected-iteration-${iteration}`,
+      content,
+    );
+    const rejection: LedgerRejection = {
+      reason: validation.reason,
+      rejectedPath,
+      source: "iteration",
+    };
+    appendDebugLog("ledger:invalid", { iteration, ...rejection });
+    this.pendingLedgerRejection = rejection;
+    this.writeValidatedLedger(snapshot);
+    return { keep: snapshot, rejection };
+  }
+
+  private reconcileLedger(rejectInvalid: boolean): string | undefined {
+    const ledgerPath = this.runInfo.ledgerPath;
+    if (ledgerPath === undefined) return undefined;
+    const iteration = this.state.currentIteration;
+    const validatedPath = validatedLedgerPath(this.runInfo.runDir);
+    const current = readLedger(ledgerPath);
+    const baseline = existsSync(validatedPath)
+      ? readFileSync(validatedPath, "utf-8")
+      : longestValidPrefix(current);
+    if (current === baseline) {
+      this.writeValidatedLedger(baseline);
+      return baseline;
+    }
+    const validation = validateLedger(baseline, current);
+    if (validation.valid) {
+      appendDebugLog("ledger:accepted", {
+        iteration,
+        records: validation.records,
+        appendedBytes: current.length - baseline.length,
+      });
+      this.writeValidatedLedger(current);
+      return current;
+    }
+    if (isLinePrefix(current, baseline)) {
+      appendDebugLog("ledger:restored", {
+        iteration,
+        restoredBytes: baseline.length - current.length,
+      });
+      this.writeLedgerFile(ledgerPath, baseline);
+      this.writeValidatedLedger(baseline);
+      return baseline;
+    }
+    if (!rejectInvalid) {
+      appendDebugLog("ledger:deferred", {
+        iteration,
+        reason: validation.reason,
+      });
+      return baseline;
+    }
+    const rejectedPath = writeRejectedLedger(
+      this.runInfo.runDir,
+      `rejected-before-iteration-${iteration}`,
+      current,
+    );
+    const rejection: LedgerRejection = {
+      reason: validation.reason,
+      rejectedPath,
+      source: "interrupted",
+    };
+    appendDebugLog("ledger:invalid", { iteration, ...rejection });
+    this.pendingLedgerRejection = rejection;
+    this.writeLedgerFile(ledgerPath, baseline);
+    this.writeValidatedLedger(baseline);
+    return baseline;
+  }
+
+  private writeValidatedLedger(content: string): void {
+    this.writeLedgerFile(validatedLedgerPath(this.runInfo.runDir), content);
+  }
+
+  private writeLedgerFile(path: string, content: string): void {
+    if (existsSync(path) && readFileSync(path, "utf-8") === content) return;
+    mkdirSync(dirname(path), { recursive: true });
+    writeFileSync(path, content, "utf-8");
+  }
+
+  private settleLedger(ledger: LedgerCheck | undefined): void {
+    const ledgerPath = this.runInfo.ledgerPath;
+    if (ledger === undefined || ledgerPath === undefined) return;
+    this.writeLedgerFile(ledgerPath, ledger.keep);
+  }
+
+  private rejectedLedgerLearning(rejection: LedgerRejection): string {
+    return `Rejected ledger saved to ${rejection.rejectedPath}`;
+  }
+
+  private recordLedgerRejection(
+    output: AgentOutput,
+    rejection: LedgerRejection,
+  ): IterationRecord {
+    const summary = `ledger validation failed: ${rejection.reason}`;
+    return this.recordFailure(
+      `[FAIL] ${summary}`,
+      summary,
+      [
+        `Agent reported ${output.success ? "success" : "failure"}: ${output.summary}`,
+        this.rejectedLedgerLearning(rejection),
+        ...toStringArray(output.key_learnings),
+      ],
+      "reported",
+      this.researchEvidence(output),
+    );
   }
 
   private recordCommitFailure(error: CommitFailedError): IterationRecord {
