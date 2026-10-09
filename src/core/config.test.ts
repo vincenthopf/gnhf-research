@@ -426,4 +426,124 @@ describe("loadConfig", () => {
       /Invalid model for agentModel\.claude: expected a string/,
     );
   });
+  describe("agents and appendSystemPrompt", () => {
+    function mockFiles(files: Record<string, string>) {
+      mockReadFileSync.mockImplementation((path) => {
+        const content = files[String(path)];
+        if (content === undefined) {
+          throw Object.assign(new Error("ENOENT"), { code: "ENOENT" });
+        }
+        return content;
+      });
+    }
+
+    it("resolves agents and appendSystemPrompt paths against the config directory", () => {
+      mockFiles({
+        [CONFIG_PATH]:
+          "agents: ./agents.json\nappendSystemPrompt: ~/system.md\n",
+        [join(CONFIG_DIR, "agents.json")]:
+          '{"skeptic":{"description":"d","prompt":"p"}}',
+        [join(HOME, "system.md")]: "be careful",
+      });
+
+      const config = loadConfig();
+
+      expect(config.agents).toBe(join(CONFIG_DIR, "agents.json"));
+      expect(config.appendSystemPrompt).toBe(join(HOME, "system.md"));
+    });
+
+    it("resolves bare file names against the config directory", () => {
+      mockFiles({
+        [CONFIG_PATH]: "agents: agents.json\nappendSystemPrompt: system.md\n",
+        [join(CONFIG_DIR, "agents.json")]: "{}",
+        [join(CONFIG_DIR, "system.md")]: "s",
+      });
+
+      const config = loadConfig();
+
+      expect(config.agents).toBe(join(CONFIG_DIR, "agents.json"));
+      expect(config.appendSystemPrompt).toBe(join(CONFIG_DIR, "system.md"));
+    });
+
+    it("rejects an agents file that does not exist", () => {
+      mockFiles({ [CONFIG_PATH]: "agents: /missing/agents.json\n" });
+
+      expect(() => loadConfig()).toThrow(
+        "Invalid config value for agents: cannot read /missing/agents.json",
+      );
+    });
+
+    it.each(["not json", "[]", "42"])(
+      "rejects an agents file that is not a JSON object: %s",
+      (content) => {
+        mockFiles({
+          [CONFIG_PATH]: "agents: /a.json\n",
+          "/a.json": content,
+        });
+
+        expect(() => loadConfig()).toThrow(
+          "Invalid config value for agents: /a.json must contain a JSON object mapping agent names to definitions",
+        );
+      },
+    );
+
+    it("rejects an appendSystemPrompt file that does not exist", () => {
+      mockFiles({ [CONFIG_PATH]: "appendSystemPrompt: /missing.md\n" });
+
+      expect(() => loadConfig()).toThrow(
+        "Invalid config value for appendSystemPrompt: cannot read /missing.md",
+      );
+    });
+
+    it.each(["agents: 42", 'agents: ""', "appendSystemPrompt: []"])(
+      "rejects a non-path value: %s",
+      (line) => {
+        mockFiles({ [CONFIG_PATH]: `${line}\n` });
+
+        expect(() => loadConfig()).toThrow(/expected a path to a file/);
+      },
+    );
+
+    it.each([
+      ["agents: /a.json", "--agents", "agents"],
+      ["agents: /a.json", "--agents=/b.json", "agents"],
+      [
+        "appendSystemPrompt: /s.md",
+        "--append-system-prompt",
+        "appendSystemPrompt",
+      ],
+      [
+        "appendSystemPrompt: /s.md",
+        "--append-system-prompt-file",
+        "appendSystemPrompt",
+      ],
+    ])(
+      "rejects %s together with %s in agentArgsOverride.claude",
+      (line, flag, key) => {
+        mockFiles({
+          [CONFIG_PATH]: `${line}\nagentArgsOverride:\n  claude:\n    - "${flag}"\n    - x\n`,
+          "/a.json": "{}",
+          "/s.md": "s",
+        });
+
+        expect(() => loadConfig()).toThrow(
+          `Invalid config value for agentArgsOverride.claude[0]: "${flag}" conflicts with ${key} in ~/.gnhf/config.yml. Remove one of them.`,
+        );
+      },
+    );
+
+    it("still passes --agents through agentArgsOverride when agents is not set", () => {
+      mockFiles({
+        [CONFIG_PATH]:
+          "agentArgsOverride:\n  claude:\n    - --agents\n    - /a.json\n    - --append-system-prompt-file\n    - /s.md\n",
+      });
+
+      expect(loadConfig().agentArgsOverride.claude).toEqual([
+        "--agents",
+        "/a.json",
+        "--append-system-prompt-file",
+        "/s.md",
+      ]);
+    });
+  });
 });

@@ -71,6 +71,8 @@ type ClaudeEvent =
   | { type: string };
 
 interface ClaudeAgentDeps {
+  agentsPath?: string;
+  appendSystemPromptPath?: string;
   bin?: string;
   effort?: EffortLevel;
   extraArgs?: string[];
@@ -158,12 +160,24 @@ function isFinalStructuredResult(event: ClaudeResultEvent): boolean {
   );
 }
 
+interface ClaudeArgsOptions {
+  extraArgs?: string[];
+  model?: string;
+  effort?: EffortLevel;
+  agentsPath?: string;
+  appendSystemPromptPath?: string;
+}
+
 function buildClaudeArgs(
   prompt: string,
   schema: AgentOutputSchema,
-  extraArgs?: string[],
-  model?: string,
-  effort?: EffortLevel,
+  {
+    extraArgs,
+    model,
+    effort,
+    agentsPath,
+    appendSystemPromptPath,
+  }: ClaudeArgsOptions,
 ): string[] {
   const userArgs = (extraArgs ?? []).filter(
     (arg, index, args) =>
@@ -185,6 +199,10 @@ function buildClaudeArgs(
     ...userArgs,
     ...(model === undefined ? [] : ["--model", model]),
     ...(effort === undefined ? [] : ["--effort", effort]),
+    ...(agentsPath === undefined ? [] : ["--agents", agentsPath]),
+    ...(appendSystemPromptPath === undefined
+      ? []
+      : ["--append-system-prompt-file", appendSystemPromptPath]),
     "-p",
     prompt,
     "--verbose",
@@ -252,6 +270,8 @@ function buildRateLimitError(
 export class ClaudeAgent implements Agent {
   name = "claude";
 
+  private agentsPath?: string;
+  private appendSystemPromptPath?: string;
   private bin: string;
   private effort?: EffortLevel;
   private extraArgs?: string[];
@@ -262,6 +282,8 @@ export class ClaudeAgent implements Agent {
 
   constructor(binOrDeps: string | ClaudeAgentDeps = {}) {
     const deps = typeof binOrDeps === "string" ? { bin: binOrDeps } : binOrDeps;
+    this.agentsPath = deps.agentsPath;
+    this.appendSystemPromptPath = deps.appendSystemPromptPath;
     this.bin = deps.bin ?? "claude";
     this.effort = deps.effort;
     this.extraArgs = deps.extraArgs;
@@ -287,13 +309,13 @@ export class ClaudeAgent implements Agent {
       appendDebugLog("claude:spawn", { model, effort: this.effort });
       const child = spawn(
         this.bin,
-        buildClaudeArgs(
-          prompt,
-          this.schema,
-          this.extraArgs,
+        buildClaudeArgs(prompt, this.schema, {
+          extraArgs: this.extraArgs,
           model,
-          this.effort,
-        ),
+          effort: this.effort,
+          agentsPath: this.agentsPath,
+          appendSystemPromptPath: this.appendSystemPromptPath,
+        }),
         {
           cwd,
           detached: this.platform !== "win32",

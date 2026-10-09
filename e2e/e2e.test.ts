@@ -2,6 +2,7 @@ import { execFileSync, spawn } from "node:child_process";
 import {
   chmodSync,
   existsSync,
+  mkdirSync,
   mkdtempSync,
   readdirSync,
   readFileSync,
@@ -279,6 +280,40 @@ describe("gnhf e2e", () => {
     expect(debugEvents).toContain("agent:run:start");
     expect(debugEvents).toContain("agent:run:end");
     expect(debugEvents).toContain("run:complete");
+  }, 30_000);
+
+  it("passes agents and appendSystemPrompt files from config to claude", async () => {
+    const cwd = createRepo();
+    tempDirs.push(cwd);
+    const logDir = mkdtempSync(join(tmpdir(), "gnhf-e2e-logs-"));
+    tempDirs.push(logDir);
+    const mockLogPath = join(logDir, "mock-claude.jsonl");
+    const env = createTestEnv(mockLogPath, tempDirs);
+    const configDir = join(env.HOME!, ".gnhf");
+    mkdirSync(configDir, { recursive: true });
+    writeFileSync(
+      join(configDir, "agents.json"),
+      '{"probe":{"description":"d","prompt":"p"}}',
+    );
+    writeFileSync(join(configDir, "system.md"), "extra rules");
+    writeFileSync(
+      join(configDir, "config.yml"),
+      "agents: agents.json\nappendSystemPrompt: ./system.md\n",
+    );
+
+    const result = await runCli(cwd, ["ship it", "--max-iterations", "1"], {
+      env,
+    });
+
+    expect(result.code).toBe(0);
+    const spawnEvent = await waitForLogEvent(mockLogPath, "spawn");
+    const args = spawnEvent.args as string[];
+    expect(args[args.indexOf("--agents") + 1]).toBe(
+      join(configDir, "agents.json"),
+    );
+    expect(args[args.indexOf("--append-system-prompt-file") + 1]).toBe(
+      join(configDir, "system.md"),
+    );
   }, 30_000);
 
   it("runs on the current branch and pushes each successful iteration", async () => {

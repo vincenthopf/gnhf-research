@@ -1024,6 +1024,8 @@ program
           ...schemaOptions,
           ...(model === undefined ? {} : { model }),
           effort: config.effort,
+          agentsPath: config.agents,
+          appendSystemPromptPath: config.appendSystemPrompt,
         },
       );
       const orchestrator = new Orchestrator(

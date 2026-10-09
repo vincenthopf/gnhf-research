@@ -13,6 +13,8 @@ export interface CreateAgentOptions {
   commitFields?: AgentOutputCommitField[];
   model?: string;
   effort: EffortLevel;
+  agentsPath?: string;
+  appendSystemPromptPath?: string;
 }
 
 function setsModel(args: string[] | undefined): boolean {
@@ -33,6 +35,8 @@ export function createAgent(
       options.model ??
       (setsModel(agentArgsOverride) ? undefined : DEFAULT_CLAUDE_MODEL),
     effort: options.effort,
+    agentsPath: options.agentsPath,
+    appendSystemPromptPath: options.appendSystemPromptPath,
     schema: buildAgentOutputSchema({
       includeStopField: options.includeStopField,
       commitFields: options.commitFields,

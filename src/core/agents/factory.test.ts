@@ -125,6 +125,20 @@ describe("createAgent", () => {
     });
   });
 
+  it("passes agents and appendSystemPrompt paths through to the ClaudeAgent", () => {
+    createAgent(undefined, undefined, {
+      includeStopField: false,
+      effort: "medium",
+      agentsPath: "/cfg/agents.json",
+      appendSystemPromptPath: "/cfg/system.md",
+    });
+
+    expect(vi.mocked(ClaudeAgent).mock.lastCall?.[0]).toMatchObject({
+      agentsPath: "/cfg/agents.json",
+      appendSystemPromptPath: "/cfg/system.md",
+    });
+  });
+
   it.each([[["--model", "sonnet"]], [["--model=sonnet"]]])(
     "leaves the model to agentArgsOverride when it sets %j",
     (extraArgs) => {

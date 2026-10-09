@@ -14,6 +14,13 @@
 # agentModel:
 #   claude: sonnet
 
+# Subagent definitions passed to claude --agents (optional)
+# A JSON file mapping agent names to definitions.
+# agents: ./agents.json
+
+# Extra system prompt passed to claude --append-system-prompt-file (optional)
+# appendSystemPrompt: ./system-prompt.md
+
 # Commit message convention (optional)
 # Defaults to: gnhf <iteration>: <summary>
 # Use Conventional Commits semantic-release headers:

@@ -21,6 +21,8 @@ export interface Config {
   agentPathOverride: Partial<Record<AgentName, string>>;
   agentArgsOverride: Partial<Record<AgentName, string[]>>;
   effort: EffortLevel;
+  agents?: string;
+  appendSystemPrompt?: string;
   commitMessage?: CommitMessageConfig;
   maxConsecutiveFailures: number;
   preventSleep: boolean;
@@ -98,14 +100,15 @@ function resolveConfigPath(raw: string, baseDir: string): string {
     return raw;
   }
 
-  const home = homedir();
-  let expanded = raw;
-  if (expanded === "~") {
-    expanded = home;
-  } else if (expanded.startsWith("~/") || expanded.startsWith("~\\")) {
-    expanded = join(home, expanded.slice(2));
+  return resolve(baseDir, expandHome(raw));
+}
+
+function expandHome(raw: string): string {
+  if (raw === "~") return homedir();
+  if (raw.startsWith("~/") || raw.startsWith("~\\")) {
+    return join(homedir(), raw.slice(2));
   }
-  return resolve(baseDir, expanded);
+  return raw;
 }
 
 function normalizeAgentPathOverride(
@@ -248,6 +251,75 @@ function normalizeAgentModel(
   return Object.keys(result).length === 0 ? undefined : result;
 }
 
+type ClaudeFileSetting = "agents" | "appendSystemPrompt";
+
+const CLAUDE_FILE_SETTING_FLAGS: Record<ClaudeFileSetting, string[]> = {
+  agents: ["--agents"],
+  appendSystemPrompt: ["--append-system-prompt", "--append-system-prompt-file"],
+};
+
+function readSettingFile(key: ClaudeFileSetting, path: string): string {
+  try {
+    return readFileSync(path, "utf-8");
+  } catch {
+    throw new InvalidConfigError(
+      `Invalid config value for ${key}: cannot read ${path}`,
+    );
+  }
+}
+
+function isJsonObject(content: string): boolean {
+  try {
+    const parsed: unknown = JSON.parse(content);
+    return (
+      typeof parsed === "object" && parsed !== null && !Array.isArray(parsed)
+    );
+  } catch {
+    return false;
+  }
+}
+
+function normalizeClaudeFileSetting(
+  key: ClaudeFileSetting,
+  value: unknown,
+  configDir: string,
+): string {
+  if (typeof value !== "string" || value.trim() === "") {
+    throw new InvalidConfigError(
+      `Invalid config value for ${key}: expected a path to a file`,
+    );
+  }
+  const path = resolve(configDir, expandHome(value.trim()));
+  const content = readSettingFile(key, path);
+  if (key === "agents" && !isJsonObject(content)) {
+    throw new InvalidConfigError(
+      `Invalid config value for agents: ${path} must contain a JSON object mapping agent names to definitions`,
+    );
+  }
+  return path;
+}
+
+function matchesFlag(arg: string, flag: string): boolean {
+  return arg === flag || arg.startsWith(`${flag}=`);
+}
+
+function assertNoClaudeFileSettingConflicts(config: Config): void {
+  const args = config.agentArgsOverride.claude ?? [];
+  for (const key of Object.keys(
+    CLAUDE_FILE_SETTING_FLAGS,
+  ) as ClaudeFileSetting[]) {
+    if (config[key] === undefined) continue;
+    const index = args.findIndex((arg) =>
+      CLAUDE_FILE_SETTING_FLAGS[key].some((flag) => matchesFlag(arg, flag)),
+    );
+    if (index !== -1) {
+      throw new InvalidConfigError(
+        `Invalid config value for agentArgsOverride.claude[${index}]: "${args[index]}" conflicts with ${key} in ~/.gnhf/config.yml. Remove one of them.`,
+      );
+    }
+  }
+}
+
 function normalizeEffort(value: unknown): EffortLevel {
   if (isEffortLevel(value)) return value;
   throw new InvalidConfigError(
@@ -344,6 +416,18 @@ function normalizeConfig(
 
   if (Object.prototype.hasOwnProperty.call(config, "effort")) {
     normalized.effort = normalizeEffort(config.effort);
+  }
+
+  for (const key of ["agents", "appendSystemPrompt"] as const) {
+    if (config[key] === undefined || config[key] === null) {
+      delete normalized[key];
+    } else {
+      normalized[key] = normalizeClaudeFileSetting(
+        key,
+        config[key],
+        configDir ?? join(homedir(), ".gnhf"),
+      );
+    }
   }
 
   const hasCommitMessage = Object.prototype.hasOwnProperty.call(
@@ -445,6 +529,13 @@ function serializeConfig(config: Config): string {
     "# agentModel:",
     "#   claude: sonnet",
     "",
+    "# Subagent definitions passed to claude --agents (optional)",
+    "# A JSON file mapping agent names to definitions.",
+    "# agents: ./agents.json",
+    "",
+    "# Extra system prompt passed to claude --append-system-prompt-file (optional)",
+    "# appendSystemPrompt: ./system-prompt.md",
+    "",
     "# Commit message convention (optional)",
     "# Defaults to: gnhf <iteration>: <summary>",
     "# Use Conventional Commits semantic-release headers:",
@@ -508,6 +599,7 @@ export function loadConfig(overrides?: Partial<Config>): Config {
     ...fileConfig,
     ...normalizeConfig(overrides ?? {}),
   };
+  assertNoClaudeFileSettingConflicts(resolvedConfig);
 
   if (shouldBootstrapConfig) {
     try {
