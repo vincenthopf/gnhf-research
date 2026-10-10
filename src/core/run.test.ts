@@ -36,7 +36,7 @@ import {
   resumeRun,
   peekRunMetadata,
   toStringArray,
-  getCompletedIterationCount,
+  getFinishedIterationCounts,
   getInterruptedIteration,
 } from "./run.js";
 import { CONVENTIONAL_COMMIT_MESSAGE } from "./commit-message.js";
@@ -986,20 +986,24 @@ describe("toStringArray", () => {
   });
 });
 
-describe("getCompletedIterationCount", () => {
+describe("getFinishedIterationCounts", () => {
   const runInfo = {
     logPath: "/repo/.gnhf/runs/run-abc/gnhf.log",
-  } as Parameters<typeof getCompletedIterationCount>[0];
+  } as Parameters<typeof getFinishedIterationCounts>[0];
 
   afterEach(() => {
     mockReadFileSync.mockReset();
     mockReadFileSync.mockReturnValue("");
   });
 
-  it("returns 0 when the run log does not exist", () => {
+  it("returns zero counts when the run log does not exist", () => {
     mockExistsSync.mockReturnValue(false);
 
-    expect(getCompletedIterationCount(runInfo)).toBe(0);
+    expect(getFinishedIterationCounts(runInfo)).toEqual({
+      completed: 0,
+      successCount: 0,
+      failCount: 0,
+    });
     expect(mockReadFileSync).not.toHaveBeenCalled();
   });
 
@@ -1007,7 +1011,7 @@ describe("getCompletedIterationCount", () => {
     mockExistsSync.mockReturnValue(true);
     mockReadFileSync.mockReturnValue(
       [
-        JSON.stringify({ event: "iteration:end", iteration: 1 }),
+        JSON.stringify({ event: "iteration:end", iteration: 1, success: true }),
         JSON.stringify({ event: "agent:run:start", iteration: 2 }),
         JSON.stringify({ event: "iteration:start", iteration: 2 }),
         "not json",
@@ -1016,24 +1020,38 @@ describe("getCompletedIterationCount", () => {
       ].join("\n"),
     );
 
-    expect(getCompletedIterationCount(runInfo)).toBe(1);
+    expect(getFinishedIterationCounts(runInfo)).toEqual({
+      completed: 1,
+      successCount: 1,
+      failCount: 0,
+    });
   });
 
-  it("counts distinct finished iterations, including a failure", () => {
+  it("counts each finished iteration once by its last outcome", () => {
     mockExistsSync.mockReturnValue(true);
     mockReadFileSync.mockReturnValue(
       [
-        JSON.stringify({ event: "iteration:end", iteration: 1 }),
-        JSON.stringify({ event: "iteration:end", iteration: 1 }),
+        JSON.stringify({
+          event: "iteration:end",
+          iteration: 1,
+          success: false,
+        }),
+        JSON.stringify({ event: "iteration:end", iteration: 1, success: true }),
+        JSON.stringify({ event: "iteration:end", iteration: 2, success: true }),
         JSON.stringify({
           event: "iteration:end",
           iteration: 3,
           success: false,
         }),
+        JSON.stringify({ event: "iteration:end", iteration: 4 }),
       ].join("\n"),
     );
 
-    expect(getCompletedIterationCount(runInfo)).toBe(2);
+    expect(getFinishedIterationCounts(runInfo)).toEqual({
+      completed: 4,
+      successCount: 2,
+      failCount: 2,
+    });
   });
 });
 

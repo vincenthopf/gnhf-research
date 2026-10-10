@@ -47,7 +47,7 @@ import {
   resumeRun,
   peekRunMetadata,
   getLastIterationNumber,
-  getCompletedIterationCount,
+  getFinishedIterationCounts,
   getInterruptedIteration,
   appendNotes,
   writeRunEndState,
@@ -1186,6 +1186,7 @@ program
           appendSystemPromptPath: config.appendSystemPrompt,
         },
       );
+      const finished = getFinishedIterationCounts(runInfo);
       const orchestrator = new Orchestrator(
         { ...config, commitMessage: effectiveCommitMessage },
         agent,
@@ -1196,7 +1197,9 @@ program
         {
           maxIterations: options.maxIterations,
           maxTokens: options.maxTokens,
-          completedIterations: getCompletedIterationCount(runInfo),
+          completedIterations: finished.completed,
+          successCount: finished.successCount,
+          failCount: finished.failCount,
           stopWhen: effectiveStopWhen,
           ...(options.until === undefined ? {} : { until: options.until }),
           ...(options.maxRateLimitWait === undefined

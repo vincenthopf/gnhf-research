@@ -16,6 +16,8 @@ import type { Config } from "./core/config.js";
 import { stripExitSummaryAnsi } from "./core/exit-summary.js";
 import type { RunInfo } from "./core/run.js";
 
+const NO_FINISHED_ITERATIONS = { completed: 0, successCount: 0, failCount: 0 };
+
 const stubRunInfo: RunInfo = {
   runId: "run-abc",
   runDir: "/repo/.gnhf/runs/run-abc",
@@ -51,7 +53,7 @@ interface CliMockOverrides {
   setupRun?: ReturnType<typeof vi.fn>;
   resumeRun?: ReturnType<typeof vi.fn>;
   getLastIterationNumber?: ReturnType<typeof vi.fn>;
-  getCompletedIterationCount?: ReturnType<typeof vi.fn>;
+  getFinishedIterationCounts?: ReturnType<typeof vi.fn>;
   orchestratorStart?: ReturnType<typeof vi.fn>;
   orchestratorGetState?: ReturnType<typeof vi.fn>;
   readStdinText?: ReturnType<typeof vi.fn>;
@@ -113,8 +115,8 @@ async function runCliWithMocks(
   const resumeRun = overrides.resumeRun ?? vi.fn();
   const getLastIterationNumber =
     overrides.getLastIterationNumber ?? vi.fn(() => 0);
-  const getCompletedIterationCount =
-    overrides.getCompletedIterationCount ?? vi.fn(() => 0);
+  const getFinishedIterationCounts =
+    overrides.getFinishedIterationCounts ?? vi.fn(() => NO_FINISHED_ITERATIONS);
   const ensureCleanWorkingTree = overrides.ensureCleanWorkingTree ?? vi.fn();
   const writeRunEndState = overrides.writeRunEndState ?? vi.fn();
 
@@ -193,7 +195,7 @@ async function runCliWithMocks(
     peekRunMetadata,
     resumeRun,
     getLastIterationNumber,
-    getCompletedIterationCount,
+    getFinishedIterationCounts,
     getInterruptedIteration: vi.fn(() => null),
     appendNotes: vi.fn(),
     writeRunEndState,
@@ -290,7 +292,7 @@ async function runCliWithMocks(
     peekRunMetadata,
     resumeRun,
     getLastIterationNumber,
-    getCompletedIterationCount,
+    getFinishedIterationCounts,
     orchestratorCtor,
     rendererCtor,
     orchestratorGetState,
@@ -398,7 +400,7 @@ async function runSigintCliTest({
     peekRunMetadata: vi.fn(() => stubRunInfo),
     resumeRun: vi.fn(),
     getLastIterationNumber: vi.fn(() => 0),
-    getCompletedIterationCount: vi.fn(() => 0),
+    getFinishedIterationCounts: vi.fn(() => NO_FINISHED_ITERATIONS),
     writeRunEndState: vi.fn(),
   }));
   vi.doMock("./core/agents/factory.js", () => ({
@@ -1315,6 +1317,8 @@ describe("cli", () => {
       maxIterations: undefined,
       maxTokens: undefined,
       completedIterations: 0,
+      successCount: 0,
+      failCount: 0,
       stopWhen: undefined,
     });
     expect(
@@ -1339,6 +1343,8 @@ describe("cli", () => {
       maxIterations: undefined,
       maxTokens: undefined,
       completedIterations: 0,
+      successCount: 0,
+      failCount: 0,
       stopWhen: undefined,
     });
     expect(
@@ -1424,6 +1430,8 @@ describe("cli", () => {
       maxIterations: 12,
       maxTokens: 3456,
       completedIterations: 0,
+      successCount: 0,
+      failCount: 0,
       maxRateLimitWaitMs: 90 * 60_000,
     });
   });
@@ -1446,6 +1454,8 @@ describe("cli", () => {
       maxIterations: undefined,
       maxTokens: undefined,
       completedIterations: 0,
+      successCount: 0,
+      failCount: 0,
       stopWhen: undefined,
       fallbackModel: "claude-haiku",
     });
@@ -1467,6 +1477,8 @@ describe("cli", () => {
       maxIterations: undefined,
       maxTokens: undefined,
       completedIterations: 0,
+      successCount: 0,
+      failCount: 0,
       stopWhen: undefined,
       push: true,
     });
@@ -1558,7 +1570,11 @@ describe("cli", () => {
       runId,
     }));
     const getLastIterationNumber = vi.fn(() => 2);
-    const getCompletedIterationCount = vi.fn(() => 1);
+    const getFinishedIterationCounts = vi.fn(() => ({
+      completed: 3,
+      successCount: 2,
+      failCount: 1,
+    }));
 
     mkdirSync(join(tempDir, ".gnhf", "runs", runId), {
       recursive: true,
@@ -1578,7 +1594,7 @@ describe("cli", () => {
           observerEvery: 5,
           preventSleep: false,
         },
-        { resumeRun, getLastIterationNumber, getCompletedIterationCount },
+        { resumeRun, getLastIterationNumber, getFinishedIterationCounts },
       );
 
       expect(resumeRun).toHaveBeenCalledWith(runId, effectiveTempDir, {
@@ -1592,11 +1608,15 @@ describe("cli", () => {
         expect.objectContaining({ runId }),
       );
       expect(orchestratorCtor.mock.calls[0]?.[5]).toBe(2);
-      expect(getCompletedIterationCount).toHaveBeenCalledWith(
+      expect(getFinishedIterationCounts).toHaveBeenCalledWith(
         expect.objectContaining({ runId }),
       );
       expect(orchestratorCtor.mock.calls[0]?.[6]).toEqual(
-        expect.objectContaining({ completedIterations: 1 }),
+        expect.objectContaining({
+          completedIterations: 3,
+          successCount: 2,
+          failCount: 1,
+        }),
       );
     } finally {
       process.chdir(originalCwd);
@@ -2117,7 +2137,7 @@ describe("cli", () => {
       peekRunMetadata: vi.fn(() => stubRunInfo),
       resumeRun: vi.fn(),
       getLastIterationNumber: vi.fn(() => 0),
-      getCompletedIterationCount: vi.fn(() => 0),
+      getFinishedIterationCounts: vi.fn(() => NO_FINISHED_ITERATIONS),
       getInterruptedIteration: vi.fn(() => null),
       appendNotes: vi.fn(),
       writeRunEndState: vi.fn(),
@@ -2277,7 +2297,7 @@ describe("cli", () => {
         promptPath,
       })),
       getLastIterationNumber: vi.fn(() => 3),
-      getCompletedIterationCount: vi.fn(() => 0),
+      getFinishedIterationCounts: vi.fn(() => NO_FINISHED_ITERATIONS),
       getInterruptedIteration: vi.fn(() => null),
       appendNotes: vi.fn(),
       writeRunEndState: vi.fn(),
@@ -2417,7 +2437,7 @@ describe("cli", () => {
         promptPath,
       })),
       getLastIterationNumber: vi.fn(() => 3),
-      getCompletedIterationCount: vi.fn(() => 0),
+      getFinishedIterationCounts: vi.fn(() => NO_FINISHED_ITERATIONS),
       getInterruptedIteration: vi.fn(() => null),
       appendNotes: vi.fn(),
       writeRunEndState: vi.fn(),
@@ -2553,7 +2573,7 @@ describe("cli", () => {
         promptPath,
       })),
       getLastIterationNumber: vi.fn(() => 3),
-      getCompletedIterationCount: vi.fn(() => 0),
+      getFinishedIterationCounts: vi.fn(() => NO_FINISHED_ITERATIONS),
       getInterruptedIteration: vi.fn(() => null),
       appendNotes: vi.fn(),
       writeRunEndState: vi.fn(),
@@ -2684,7 +2704,7 @@ describe("cli", () => {
         promptPath,
       })),
       getLastIterationNumber: vi.fn(() => 3),
-      getCompletedIterationCount: vi.fn(() => 0),
+      getFinishedIterationCounts: vi.fn(() => NO_FINISHED_ITERATIONS),
       getInterruptedIteration: vi.fn(() => null),
       appendNotes: vi.fn(),
       writeRunEndState: vi.fn(),
@@ -2812,7 +2832,7 @@ describe("cli", () => {
         promptPath,
       })),
       getLastIterationNumber: vi.fn(() => 3),
-      getCompletedIterationCount: vi.fn(() => 0),
+      getFinishedIterationCounts: vi.fn(() => NO_FINISHED_ITERATIONS),
       getInterruptedIteration: vi.fn(() => null),
       appendNotes: vi.fn(),
       writeRunEndState: vi.fn(),
@@ -2935,7 +2955,7 @@ describe("cli", () => {
       peekRunMetadata,
       resumeRun,
       getLastIterationNumber: vi.fn(() => 3),
-      getCompletedIterationCount: vi.fn(() => 0),
+      getFinishedIterationCounts: vi.fn(() => NO_FINISHED_ITERATIONS),
       getInterruptedIteration: vi.fn(() => 2),
       appendNotes: vi.fn(),
       writeRunEndState: vi.fn(),
@@ -3099,7 +3119,7 @@ describe("cli", () => {
       peekRunMetadata,
       resumeRun,
       getLastIterationNumber: vi.fn(() => 3),
-      getCompletedIterationCount: vi.fn(() => 0),
+      getFinishedIterationCounts: vi.fn(() => NO_FINISHED_ITERATIONS),
       getInterruptedIteration: vi.fn(() => null),
       appendNotes: vi.fn(),
       writeRunEndState: vi.fn(),
@@ -3271,7 +3291,7 @@ describe("cli", () => {
       peekRunMetadata: vi.fn(() => stubRunInfo),
       resumeRun: vi.fn(),
       getLastIterationNumber: vi.fn(() => 0),
-      getCompletedIterationCount: vi.fn(() => 0),
+      getFinishedIterationCounts: vi.fn(() => NO_FINISHED_ITERATIONS),
       getInterruptedIteration: vi.fn(() => null),
       appendNotes: vi.fn(),
       writeRunEndState: vi.fn(),
@@ -3421,7 +3441,7 @@ describe("cli", () => {
       peekRunMetadata: vi.fn(() => stubRunInfo),
       resumeRun: vi.fn(),
       getLastIterationNumber: vi.fn(() => 0),
-      getCompletedIterationCount: vi.fn(() => 0),
+      getFinishedIterationCounts: vi.fn(() => NO_FINISHED_ITERATIONS),
       getInterruptedIteration: vi.fn(() => null),
       appendNotes: vi.fn(),
       writeRunEndState: vi.fn(),
@@ -3599,7 +3619,7 @@ describe("cli", () => {
       peekRunMetadata: vi.fn(() => stubRunInfo),
       resumeRun: vi.fn(),
       getLastIterationNumber: vi.fn(() => 0),
-      getCompletedIterationCount: vi.fn(() => 0),
+      getFinishedIterationCounts: vi.fn(() => NO_FINISHED_ITERATIONS),
       getInterruptedIteration: vi.fn(() => null),
       appendNotes: vi.fn(),
       writeRunEndState: vi.fn(),
@@ -3755,7 +3775,7 @@ describe("cli", () => {
       peekRunMetadata: vi.fn(() => stubRunInfo),
       resumeRun: vi.fn(),
       getLastIterationNumber: vi.fn(() => 0),
-      getCompletedIterationCount: vi.fn(() => 0),
+      getFinishedIterationCounts: vi.fn(() => NO_FINISHED_ITERATIONS),
       getInterruptedIteration: vi.fn(() => null),
       appendNotes: vi.fn(),
       writeRunEndState: vi.fn(),
@@ -4184,6 +4204,8 @@ describe("cli", () => {
         maxIterations: undefined,
         maxTokens: undefined,
         completedIterations: 0,
+        successCount: 0,
+        failCount: 0,
         stopWhen: undefined,
       });
     } finally {

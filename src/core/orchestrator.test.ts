@@ -2022,6 +2022,26 @@ describe("Orchestrator backoff behavior", () => {
     });
   });
 
+  it("starts from the success and failure counts of earlier runs", () => {
+    const agent: Agent = { name: "claude", run: vi.fn() };
+    const orchestrator = new Orchestrator(
+      config,
+      agent,
+      runInfo,
+      "ship it",
+      "/repo",
+      5,
+      { completedIterations: 5, successCount: 3, failCount: 2 },
+    );
+
+    expect(orchestrator.getState()).toMatchObject({
+      currentIteration: 5,
+      completedIterations: 5,
+      successCount: 3,
+      failCount: 2,
+    });
+  });
+
   it("counts an iteration only after it finishes and keeps the cap", async () => {
     let resolveRun: ((value: AgentResult) => void) | undefined;
     const agent: Agent = {

@@ -113,6 +113,8 @@ export interface RunLimits {
   // Finished iterations restored on resume. Distinct from startIteration,
   // which follows the newest attempt log even when that attempt never ended.
   completedIterations?: number;
+  successCount?: number;
+  failCount?: number;
 }
 
 const STOP_CLOSE_AGENT_GRACE_MS = 250;
@@ -239,6 +241,8 @@ export class Orchestrator extends EventEmitter<OrchestratorEvents> {
     if (limits.completedIterations !== undefined) {
       this.state.completedIterations = limits.completedIterations;
     }
+    this.state.successCount = limits.successCount ?? 0;
+    this.state.failCount = limits.failCount ?? 0;
     this.state.maxIterations = limits.maxIterations;
     this.state.commitCount = getBranchCommitCount(
       this.runInfo.baseCommit,

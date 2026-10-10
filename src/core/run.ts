@@ -441,31 +441,44 @@ export function getLastIterationNumber(runInfo: RunInfo): number {
   return max;
 }
 
+export interface FinishedIterationCounts {
+  completed: number;
+  successCount: number;
+  failCount: number;
+}
+
 // Attempt logs are created when an iteration starts. Only iteration:end
 // records an iteration that actually finished, including a failed one.
-export function getCompletedIterationCount(runInfo: RunInfo): number {
-  if (!existsSync(runInfo.logPath)) return 0;
-
-  const finished = new Set<number>();
-  for (const line of readFileSync(runInfo.logPath, "utf-8").split("\n")) {
-    if (line.length === 0) continue;
-    let event: { event?: unknown; iteration?: unknown };
-    try {
-      event = JSON.parse(line) as { event?: unknown; iteration?: unknown };
-    } catch {
-      continue;
+export function getFinishedIterationCounts(
+  runInfo: RunInfo,
+): FinishedIterationCounts {
+  const outcomes = new Map<number, boolean>();
+  if (existsSync(runInfo.logPath)) {
+    for (const line of readFileSync(runInfo.logPath, "utf-8").split("\n")) {
+      if (line.length === 0) continue;
+      let event: { event?: unknown; iteration?: unknown; success?: unknown };
+      try {
+        event = JSON.parse(line) as typeof event;
+      } catch {
+        continue;
+      }
+      if (event.event !== "iteration:end") continue;
+      if (
+        typeof event.iteration !== "number" ||
+        !Number.isInteger(event.iteration) ||
+        event.iteration < 0
+      ) {
+        continue;
+      }
+      outcomes.set(event.iteration, event.success === true);
     }
-    if (event.event !== "iteration:end") continue;
-    if (
-      typeof event.iteration !== "number" ||
-      !Number.isInteger(event.iteration) ||
-      event.iteration < 0
-    ) {
-      continue;
-    }
-    finished.add(event.iteration);
   }
-  return finished.size;
+  const successCount = [...outcomes.values()].filter(Boolean).length;
+  return {
+    completed: outcomes.size,
+    successCount,
+    failCount: outcomes.size - successCount,
+  };
 }
 
 const ITERATION_CLOSING_EVENTS = new Set([

@@ -415,6 +415,7 @@ describe("gnhf e2e", () => {
     expect(resumed.stdout).toContain(
       "exec 0 · reason 6 · goals stale 0 · open contracts 0 · no boundary 6",
     );
+    expect(resumed.stdout).toMatch(/6 total\s+6 good\s+0 failed/);
   }, 30_000);
 
   it("rejects an iteration that rewrites an earlier ledger line and tells the next iteration", async () => {
