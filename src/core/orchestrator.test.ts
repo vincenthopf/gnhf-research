@@ -3738,7 +3738,7 @@ describe("Orchestrator research ledger", () => {
       .mocked(agent.run)
       .mock.calls.map((call) => String(call[0]));
     expect(prompts[0]).toContain("## Previous Ledger Rejection");
-    expect(prompts[0]).toContain("interrupted");
+    expect(prompts[0]).toContain("made outside a checked iteration");
     expect(prompts[0]).toContain(rejectedPath);
     expect(prompts[1]).not.toContain("## Previous Ledger Rejection");
     expect(mockAppendDebugLog).toHaveBeenCalledWith(

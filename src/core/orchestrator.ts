@@ -142,7 +142,7 @@ type ProviderResumeWait =
 interface LedgerRejection {
   reason: string;
   rejectedPath: string;
-  source: "iteration" | "interrupted";
+  source: "iteration" | "outside";
 }
 
 interface LedgerCheck {
@@ -978,7 +978,7 @@ ${this.pendingCommitFailure}
       rejection.source === "iteration"
         ? `gnhf rejected the ledger written by the previous iteration: ${rejection.reason}.
 That iteration was marked failed, and the ledger was restored to its content from before that iteration.`
-        : `gnhf rejected ledger changes left by an interrupted earlier iteration (aborted, stopped, rate-limited or crashed): ${rejection.reason}.
+        : `gnhf rejected ledger changes made outside a checked iteration, for example by an aborted, stopped, rate-limited or crashed iteration or by a manual edit: ${rejection.reason}.
 The ledger was restored to its last validated content.`;
     return `${prompt}
 
@@ -1067,7 +1067,7 @@ The rejected ledger is saved at ${rejection.rejectedPath}. Earlier lines must st
     const rejection: LedgerRejection = {
       reason: validation.reason,
       rejectedPath,
-      source: "interrupted",
+      source: "outside",
     };
     appendDebugLog("ledger:invalid", { iteration, ...rejection });
     this.pendingLedgerRejection = rejection;

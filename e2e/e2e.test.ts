@@ -513,7 +513,7 @@ describe("gnhf e2e", () => {
     );
     expect(prompts).toHaveLength(2);
     expect(prompts[1]).toContain("## Previous Ledger Rejection");
-    expect(prompts[1]).toContain("interrupted");
+    expect(prompts[1]).toContain("made outside a checked iteration");
     expect(prompts[1]).toContain(rejectedPath);
     expect(readFileSync(rejectedPath, "utf-8")).toBe(partial);
     const ids = readFileSync(ledgerPath, "utf-8")
