@@ -66,12 +66,15 @@ function idSuffix(id: unknown): string {
   return typeof id === "string" && id.length > 0 ? ` (id ${id})` : "";
 }
 
-function idOfLine(text: string | undefined): unknown {
-  if (text === undefined) return undefined;
+export function parseJsonObject(
+  line: string,
+): Record<string, unknown> | undefined {
   try {
-    const parsed: unknown = JSON.parse(text);
-    return typeof parsed === "object" && parsed !== null
-      ? (parsed as Record<string, unknown>).id
+    const parsed: unknown = JSON.parse(line);
+    return typeof parsed === "object" &&
+      parsed !== null &&
+      !Array.isArray(parsed)
+      ? (parsed as Record<string, unknown>)
       : undefined;
   } catch {
     return undefined;
@@ -88,10 +91,10 @@ function checkPrefix(previous: string, current: string): string | null {
       i >= after.length ||
       (after[i] === "" && old !== "" && i === after.length - 1)
     ) {
-      return `line ${i + 1} deleted${idSuffix(idOfLine(old))}`;
+      return `line ${i + 1} deleted${idSuffix(parseJsonObject(old)?.id)}`;
     }
     if (after[i] !== old) {
-      return `line ${i + 1} changed${idSuffix(idOfLine(old))}`;
+      return `line ${i + 1} changed${idSuffix(parseJsonObject(old)?.id)}`;
     }
   }
   return null;

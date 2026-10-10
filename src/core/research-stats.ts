@@ -1,4 +1,5 @@
 import { existsSync, readFileSync } from "node:fs";
+import { parseJsonObject } from "./ledger.js";
 import type { ResearchEvidence } from "./workflow.js";
 
 export interface ResearchStats {
@@ -35,25 +36,11 @@ function strings(value: unknown): string[] {
     : [];
 }
 
-function parseObject(line: string): Record<string, unknown> | undefined {
-  if (line.trim().length === 0) return undefined;
-  try {
-    const parsed: unknown = JSON.parse(line);
-    return typeof parsed === "object" &&
-      parsed !== null &&
-      !Array.isArray(parsed)
-      ? (parsed as Record<string, unknown>)
-      : undefined;
-  } catch {
-    return undefined;
-  }
-}
-
 export function readResearchHistory(logPath: string): ResearchHistoryEntry[] {
   if (!existsSync(logPath)) return [];
   const byIteration = new Map<number, ResearchHistoryEntry>();
   for (const line of readFileSync(logPath, "utf-8").split("\n")) {
-    const event = parseObject(line);
+    const event = parseJsonObject(line);
     if (
       event?.event !== "iteration:end" ||
       typeof event.evidenceOrigin !== "string" ||
@@ -95,7 +82,7 @@ export function computeResearchStats(
     origins.filter((value) => value === origin).length;
   const records = ledger
     .split("\n")
-    .map(parseObject)
+    .map(parseJsonObject)
     .filter((record) => record !== undefined);
   const contractsRun = new Set(
     history
