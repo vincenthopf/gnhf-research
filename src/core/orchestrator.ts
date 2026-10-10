@@ -926,7 +926,7 @@ export class Orchestrator extends EventEmitter<OrchestratorEvents> {
       this.noProgressStreak = committed ? 0 : this.noProgressStreak + 1;
     } catch (error) {
       if (error instanceof CommitFailedError) {
-        return this.recordCommitFailure(error);
+        return this.recordCommitFailure(error, evidence);
       }
       throw error;
     }
@@ -1171,7 +1171,10 @@ The rejected ledger is saved at ${rejection.rejectedPath}. Earlier lines must st
     );
   }
 
-  private recordCommitFailure(error: CommitFailedError): IterationRecord {
+  private recordCommitFailure(
+    error: CommitFailedError,
+    evidence?: ResearchEvidence,
+  ): IterationRecord {
     this.pendingCommitFailure = error.detail;
     this.noProgressStreak = 0;
     const summary = "git commit failed; asking agent to repair the workspace";
@@ -1181,6 +1184,7 @@ The rejected ledger is saved at ${rejection.rejectedPath}. Earlier lines must st
       `[ERROR] ${summary}`,
       [],
       [error.detail],
+      ...(evidence === undefined ? [] : [evidence]),
     );
     this.state.failCount++;
     this.state.consecutiveFailures++;
@@ -1193,6 +1197,7 @@ The rejected ledger is saved at ${rejection.rejectedPath}. Earlier lines must st
       keyChanges: [],
       keyLearnings: [error.detail],
       timestamp: new Date(),
+      ...(evidence === undefined ? {} : { evidence }),
     };
   }
 

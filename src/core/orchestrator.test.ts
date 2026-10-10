@@ -3309,6 +3309,36 @@ describe("Orchestrator research workflow", () => {
     );
   });
 
+  it("records research evidence when the commit fails", async () => {
+    mockCommitAll.mockImplementationOnce(() => {
+      throw new CommitFailedError(new Error("hook failed"));
+    });
+    const orchestrator = new Orchestrator(
+      config,
+      researchAgent(true),
+      researchRunInfo,
+      "study it",
+      "/repo",
+      0,
+      { maxIterations: 1 },
+    );
+
+    await orchestrator.start();
+
+    expect(mockAppendNotes).toHaveBeenCalledWith(
+      researchRunInfo.notesPath,
+      1,
+      "[ERROR] git commit failed; asking agent to repair the workspace",
+      [],
+      ["hook failed"],
+      expect.objectContaining({ evidenceOrigin: "executed" }),
+    );
+    expect(mockAppendDebugLog).toHaveBeenCalledWith(
+      "iteration:end",
+      expect.objectContaining({ success: false, evidenceOrigin: "executed" }),
+    );
+  });
+
   it("coerces malformed research fields instead of failing after the commit", async () => {
     const agent: Agent = {
       name: "claude",
