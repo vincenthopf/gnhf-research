@@ -15,20 +15,20 @@ import { basename, dirname, join, resolve } from "node:path";
 import process from "node:process";
 import { createInterface } from "node:readline";
 import { Command, InvalidArgumentError } from "commander";
+import { loadConfig } from "./core/config.js";
+import { parseUntil } from "./core/deadline.js";
 import {
-  AGENT_NAMES,
-  isAgentSpec,
-  loadConfig,
-  redactAgentSpecForLogs,
-  type AgentName,
-  type AgentSpec,
-} from "./core/config.js";
+  EFFORT_LEVEL_LIST,
+  isEffortLevel,
+  type EffortLevel,
+} from "./core/effort.js";
 import {
   appendDebugLog,
   initDebugLog,
   serializeError,
 } from "./core/debug-log.js";
 import {
+  commitAll,
   ensureCleanWorkingTree,
   createBranch,
   getHeadCommit,
@@ -47,7 +47,9 @@ import {
   resumeRun,
   peekRunMetadata,
   getLastIterationNumber,
-  getCompletedIterationCount,
+  getFinishedIterationCounts,
+  getInterruptedIteration,
+  appendNotes,
   writeRunEndState,
 } from "./core/run.js";
 import { readStdinText } from "./core/stdin.js";
@@ -66,6 +68,7 @@ import {
 import { MockOrchestrator } from "./mock-orchestrator.js";
 import { Renderer } from "./renderer.js";
 import { slugifyPrompt } from "./utils/slugify.js";
+import { parseWorkflow, type Workflow } from "./core/workflow.js";
 import { getTotalTokenCount } from "./utils/tokens.js";
 
 const packageVersion = JSON.parse(
@@ -77,11 +80,7 @@ const GNHF_REEXEC_STDIN_PROMPT = "GNHF_REEXEC_STDIN_PROMPT";
 const GNHF_REEXEC_STDIN_PROMPT_FILE = "GNHF_REEXEC_STDIN_PROMPT_FILE";
 const GNHF_REEXEC_STDIN_PROMPT_DIR_PREFIX = "gnhf-stdin-";
 const GNHF_REEXEC_STDIN_PROMPT_FILENAME = "prompt.txt";
-const AGENT_NAME_SET = new Set<string>(AGENT_NAMES);
-const AGENT_NAME_LIST = `"${AGENT_NAMES.slice(0, -1).join('", "')}", or "${
-  AGENT_NAMES[AGENT_NAMES.length - 1]
-}"`;
-const AGENT_SPEC_LIST = `${AGENT_NAME_LIST}, or "acp:<target-or-command>" (e.g. acp:gemini)`;
+const GNHF_REEXEC_NEW_WORKTREE = "GNHF_REEXEC_NEW_WORKTREE";
 
 class PromptSignalError extends Error {
   constructor(public readonly signal: NodeJS.Signals) {
@@ -127,6 +126,38 @@ function parseDuration(value: string): number {
   return duration;
 }
 
+function parseWorkflowOption(value: string): Workflow {
+  try {
+    return parseWorkflow(value);
+  } catch (err) {
+    throw new InvalidArgumentError((err as Error).message);
+  }
+}
+
+function parseLedgerOption(value: string): string {
+  if (value.trim().length === 0) {
+    throw new InvalidArgumentError("must not be empty");
+  }
+  return value;
+}
+
+function parseUntilOption(value: string): Date {
+  try {
+    return parseUntil(value);
+  } catch (err) {
+    throw new InvalidArgumentError((err as Error).message);
+  }
+}
+
+function pinUntilArg(args: string[], until: Date | undefined): string[] {
+  if (until === undefined) return args;
+  const instant = until.toISOString();
+  return args.map((arg, index) => {
+    if (arg.startsWith("--until=")) return `--until=${instant}`;
+    return args[index - 1] === "--until" ? instant : arg;
+  });
+}
+
 function parseMeteorFrequency(value: string): number {
   const parsed = parseNonNegativeInteger(value);
   if (parsed > MAX_METEOR_FREQUENCY) {
@@ -153,9 +184,11 @@ function parseModel(value: string): string {
   return model;
 }
 
-function isOpenCodeModel(model: string): boolean {
-  const slashIndex = model.indexOf("/");
-  return slashIndex > 0 && slashIndex < model.length - 1;
+function parseEffort(value: string): EffortLevel {
+  if (!isEffortLevel(value)) {
+    throw new InvalidArgumentError(`must be one of: ${EFFORT_LEVEL_LIST}`);
+  }
+  return value;
 }
 
 function humanizeErrorMessage(message: string): string {
@@ -164,18 +197,6 @@ function humanizeErrorMessage(message: string): string {
   }
 
   return message;
-}
-
-function isAgentName(name: string): name is AgentName {
-  return AGENT_NAME_SET.has(name);
-}
-
-function getNativeAgentName(spec: AgentSpec): AgentName | undefined {
-  return isAgentName(spec) ? spec : undefined;
-}
-
-function getTelemetryAgent(spec: AgentSpec): string {
-  return redactAgentSpecForLogs(spec);
 }
 
 function shouldUseColor(): boolean {
@@ -200,30 +221,10 @@ function emptyBranchDiffStats(commitCount: number): BranchDiffStats {
   };
 }
 
-function redactDebugArgs(args: string[]): string[] {
-  const redacted = [...args];
-  for (let i = 0; i < redacted.length; i += 1) {
-    const arg = redacted[i];
-    if (arg === "--") break;
-    if (arg === "--agent") {
-      const next = redacted[i + 1];
-      if (next !== undefined) {
-        redacted[i + 1] = redactAgentSpecForLogs(next);
-        i += 1;
-      }
-      continue;
-    }
-    if (arg?.startsWith("--agent=")) {
-      redacted[i] =
-        `--agent=${redactAgentSpecForLogs(arg.slice("--agent=".length))}`;
-    }
-  }
-  return redacted;
-}
-
 function buildSchemaOptions(
   stopWhen: string | undefined,
   commitMessage: CommitMessageConfig | undefined,
+  workflow: Workflow | undefined,
 ): RunSchemaOptions {
   const commitFields = getCommitMessageSchemaFields(commitMessage);
   return {
@@ -231,23 +232,66 @@ function buildSchemaOptions(
     ...(stopWhen === undefined ? {} : { stopWhen }),
     ...(commitMessage === undefined ? {} : { commitMessage }),
     ...(commitFields.length === 0 ? {} : { commitFields }),
+    ...(workflow === "research" ? { workflow } : {}),
   };
 }
 
 function buildResumeSchemaOptions(
   stopWhen: string | undefined,
   commitMessage: CommitMessageConfig | undefined,
+  workflow: Workflow | undefined,
+  ledger: string | undefined,
 ): RunSchemaOptions {
   const commitFields = getCommitMessageSchemaFields(commitMessage);
+  const workflowOverride = {
+    ...(workflow === undefined ? {} : { workflow }),
+    ...(ledger === undefined ? {} : { ledger }),
+  };
   if (stopWhen === "") {
     return {
       includeStopField: false,
       clearStopWhen: true,
       ...(commitMessage === undefined ? {} : { commitMessage }),
       ...(commitFields.length === 0 ? {} : { commitFields }),
+      ...workflowOverride,
     };
   }
-  return buildSchemaOptions(stopWhen, commitMessage);
+  return {
+    ...buildSchemaOptions(stopWhen, commitMessage, undefined),
+    ...workflowOverride,
+  };
+}
+
+function recoverInterruptedIteration(runDir: string, cwd: string): void {
+  const iteration = getInterruptedIteration(runDir);
+  if (iteration === null) return;
+  const before = getHeadCommit(cwd);
+  try {
+    commitAll(
+      `gnhf ${iteration}: wip from interrupted iteration, recovered on resume`,
+      cwd,
+      { verify: false },
+    );
+  } catch (error) {
+    throw new Error(
+      `Could not commit the changes left by interrupted iteration ${iteration} ` +
+        `(${error instanceof Error ? error.message : String(error)}). ` +
+        `Commit or discard them in ${cwd}, then re-run gnhf.`,
+    );
+  }
+  const commit = getHeadCommit(cwd);
+  if (commit === before) return;
+  appendNotes(
+    join(runDir, "notes.md"),
+    iteration,
+    `[INTERRUPTED] gnhf stopped during this iteration. Its uncommitted changes were committed as wip commit ${commit.slice(0, 12)} on resume without checks or pre-commit hooks. Review them before building on them.`,
+    [],
+    [],
+  );
+  appendDebugLog("resume:wip-commit", { iteration, commit });
+  console.error(
+    `\n  gnhf: committed changes left by interrupted iteration ${iteration} as ${commit.slice(0, 12)}\n`,
+  );
 }
 
 function initializeNewBranch(
@@ -272,9 +316,11 @@ function resumeCurrentBranchRun(
   schemaOptions: RunSchemaOptions,
 ): RunInfo | null {
   const runId = promptRunId(prompt);
-  if (!existsSync(join(cwd, ".gnhf", "runs", runId))) {
+  const runDir = join(cwd, ".gnhf", "runs", runId);
+  if (!existsSync(runDir)) {
     return null;
   }
+  recoverInterruptedIteration(runDir, cwd);
   ensureCleanWorkingTree(cwd);
   return resumeRun(runId, cwd, schemaOptions);
 }
@@ -383,6 +429,10 @@ function initializeWorktreeRun(
           `"git worktree remove ${candidateWorktreePath}" to start fresh.`,
       );
     }
+    recoverInterruptedIteration(
+      join(candidateWorktreePath, ".gnhf", "runs", candidateRunId),
+      candidateWorktreePath,
+    );
     const runInfo = resumeRun(
       candidateRunId,
       candidateWorktreePath,
@@ -593,6 +643,15 @@ function readReexecStdinPrompt(env: NodeJS.ProcessEnv): string | undefined {
   return undefined;
 }
 
+function takeReexecNewWorktree(env: NodeJS.ProcessEnv): string | undefined {
+  const worktreePath = env[GNHF_REEXEC_NEW_WORKTREE];
+  delete env[GNHF_REEXEC_NEW_WORKTREE];
+  if (worktreePath === undefined || env.GNHF_SLEEP_INHIBITED !== "1") {
+    return undefined;
+  }
+  return resolve(worktreePath);
+}
+
 const program = new Command();
 
 program
@@ -601,13 +660,14 @@ program
   .version(packageVersion)
   .argument("[prompt]", "The objective for the coding agent")
   .option(
-    "--agent <agent>",
-    `Agent to use (${AGENT_NAMES.join(", ")}, or acp:<target-or-command>)`,
+    "--model <model>",
+    "Claude model; overrides agentModel.claude from config",
+    parseModel,
   )
   .option(
-    "--model <model>",
-    "Model for the agent; overrides agentModel.<agent> from config",
-    parseModel,
+    "--effort <level>",
+    `Claude reasoning effort (${EFFORT_LEVEL_LIST}); overrides effort from config`,
+    parseEffort,
   )
   .option(
     "--max-iterations <n>",
@@ -625,12 +685,27 @@ program
     parseDuration,
   )
   .option(
+    "--until <time>",
+    'Wrap up and stop at this local time ("17:30" for its next occurrence, or "2026-10-11T06:00"); runs one final summary iteration once it passes',
+    parseUntilOption,
+  )
+  .option(
     "--fallback-model <model>",
     "Retry a Claude usage-limit rejection with this model instead of waiting",
   )
   .option(
     "--stop-when <condition>",
     'End when the agent reports this condition, after any commit-failure repair; resumes reuse it, pass a new value to overwrite or "" to clear',
+  )
+  .option(
+    "--workflow <name>",
+    'Iteration workflow ("default" or "research"); resumes reuse the stored workflow, pass a value to overwrite it',
+    parseWorkflowOption,
+  )
+  .option(
+    "--ledger <path>",
+    "Research ledger file, relative to the repo root or absolute (requires --workflow research); resumes reuse the stored path, pass a value to overwrite it",
+    parseLedgerOption,
   )
   .option(
     "--prevent-sleep <mode>",
@@ -663,13 +738,16 @@ program
     async (
       promptArg: string | undefined,
       options: {
-        agent?: string;
         model?: string;
+        effort?: EffortLevel;
         maxIterations?: number;
         maxTokens?: number;
         maxRateLimitWait?: number;
+        until?: Date;
         fallbackModel?: string;
         stopWhen?: string;
+        workflow?: Workflow;
+        ledger?: string;
         preventSleep?: boolean;
         worktree: boolean;
         currentBranch: boolean;
@@ -684,7 +762,7 @@ program
         const renderer = new Renderer(
           mock as unknown as Orchestrator,
           "let's minimize app startup latency without sacrificing any functionality",
-          "codex",
+          "claude",
           () => {
             mock.handleInterrupt();
           },
@@ -707,58 +785,14 @@ program
       let prompt = promptArg;
       let promptFromStdin = false;
 
-      const agentName = options.agent;
-      if (agentName !== undefined && !isAgentSpec(agentName)) {
-        console.error(
-          `Unknown agent: ${options.agent}. Use ${AGENT_SPEC_LIST}.`,
-        );
-        process.exit(1);
-      }
-
-      const loadedConfig = loadConfig(
-        agentName
-          ? {
-              agent: agentName,
-            }
-          : {},
-      );
+      const loadedConfig = loadConfig();
       const config = {
         ...loadedConfig,
         ...(options.preventSleep === undefined
           ? {}
           : { preventSleep: options.preventSleep }),
+        ...(options.effort === undefined ? {} : { effort: options.effort }),
       };
-      if (!isAgentSpec(config.agent)) {
-        console.error(
-          `Unknown agent: ${config.agent}. Use ${AGENT_SPEC_LIST}.`,
-        );
-        process.exit(1);
-      }
-      const nativeAgent = getNativeAgentName(config.agent);
-      if (options.model !== undefined && nativeAgent === undefined) {
-        console.error("--model is not supported with ACP targets.");
-        process.exit(1);
-      }
-      if (
-        options.model !== undefined &&
-        nativeAgent === "opencode" &&
-        !isOpenCodeModel(options.model)
-      ) {
-        console.error("--model for --agent opencode must use provider/model.");
-        process.exit(1);
-      }
-      if (options.model !== undefined && nativeAgent === "rovodev") {
-        console.error(
-          "--model is not supported with --agent rovodev. Set agent.modelId in Rovo Dev settings instead.",
-        );
-        process.exit(1);
-      }
-      if (options.fallbackModel !== undefined && config.agent !== "claude") {
-        console.error(
-          "--fallback-model is only supported with --agent claude.",
-        );
-        process.exit(1);
-      }
 
       initDefaultTelemetry({
         app: "gnhf",
@@ -781,6 +815,7 @@ program
       let effectiveCwd = cwd;
       let worktreePath: string | null = null;
       let worktreeCleanup: (() => void) | null = null;
+      let createdWorktreePath: string | null = null;
       let getOrchestratorState:
         | (() => ReturnType<Orchestrator["getState"]>)
         | null = null;
@@ -806,6 +841,19 @@ program
         process.exit(1);
       }
 
+      if (options.ledger !== undefined && options.workflow !== "research") {
+        console.error(
+          "--ledger requires --workflow research. Pass --workflow research with --ledger, also when resuming.",
+        );
+        process.exit(1);
+      }
+      const withLedgerOption = (
+        runSchemaOptions: RunSchemaOptions,
+      ): RunSchemaOptions =>
+        options.ledger === undefined
+          ? runSchemaOptions
+          : { ...runSchemaOptions, ledger: options.ledger };
+
       const cliStopWhen =
         options.stopWhen === "" ? undefined : options.stopWhen;
       let effectiveStopWhen = cliStopWhen;
@@ -813,6 +861,7 @@ program
       let schemaOptions = buildSchemaOptions(
         effectiveStopWhen,
         effectiveCommitMessage,
+        options.workflow,
       );
 
       let runInfo;
@@ -834,14 +883,22 @@ program
         const wt = initializeWorktreeRun(
           prompt,
           cwd,
-          schemaOptions,
-          buildResumeSchemaOptions(options.stopWhen, effectiveCommitMessage),
+          withLedgerOption(schemaOptions),
+          buildResumeSchemaOptions(
+            options.stopWhen,
+            effectiveCommitMessage,
+            options.workflow,
+            options.ledger,
+          ),
         );
         runInfo = wt.runInfo;
         effectiveCwd = wt.effectiveCwd;
         worktreePath = wt.worktreePath;
+        const reexecNewWorktree = takeReexecNewWorktree(process.env);
+        const createdByReexecWrapper =
+          wt.resumed && reexecNewWorktree === resolve(wt.worktreePath);
 
-        if (wt.resumed) {
+        if (wt.resumed && !createdByReexecWrapper) {
           // Preserved worktree is always kept on exit regardless of this
           // invocation's commit count; previous commits are already there.
           effectiveStopWhen = runInfo.stopWhen;
@@ -849,6 +906,7 @@ program
           schemaOptions = buildSchemaOptions(
             effectiveStopWhen,
             effectiveCommitMessage,
+            runInfo.workflow,
           );
           startIteration = getLastIterationNumber(runInfo);
           console.error(
@@ -856,6 +914,7 @@ program
               `\n  gnhf: continuing run ${runInfo.runId} from iteration ${startIteration}\n`,
           );
         } else {
+          createdWorktreePath = wt.worktreePath;
           worktreeCleanup = () => {
             try {
               removeWorktree(cwd, wt.worktreePath);
@@ -886,7 +945,12 @@ program
         const existing = resumeCurrentBranchRun(
           prompt,
           cwd,
-          buildResumeSchemaOptions(options.stopWhen, effectiveCommitMessage),
+          buildResumeSchemaOptions(
+            options.stopWhen,
+            effectiveCommitMessage,
+            options.workflow,
+            options.ledger,
+          ),
         );
 
         if (existing) {
@@ -896,10 +960,15 @@ program
           schemaOptions = buildSchemaOptions(
             effectiveStopWhen,
             effectiveCommitMessage,
+            existing.workflow,
           );
           startIteration = getLastIterationNumber(existing);
         } else {
-          runInfo = initializeCurrentBranchRun(prompt, cwd, schemaOptions);
+          runInfo = initializeCurrentBranchRun(
+            prompt,
+            cwd,
+            withLedgerOption(schemaOptions),
+          );
         }
       } else if (onGnhfBranch) {
         const existingRunId = currentBranch.slice("gnhf/".length);
@@ -911,18 +980,22 @@ program
         );
 
         if (!prompt || prompt === existingPrompt) {
+          recoverInterruptedIteration(existingMetadata.runDir, cwd);
           const existing = resumeRun(
             existingRunId,
             cwd,
             buildResumeSchemaOptions(
               options.stopWhen,
               existingMetadata.commitMessage,
+              options.workflow,
+              options.ledger,
             ),
           );
           const resumeStopWhen = existing.stopWhen;
           const resumeSchemaOptions = buildSchemaOptions(
             resumeStopWhen,
             existing.commitMessage,
+            existing.workflow,
           );
           prompt = existingPrompt;
           runInfo = existing;
@@ -942,6 +1015,7 @@ program
           );
 
           if (answer === "o") {
+            recoverInterruptedIteration(existingMetadata.runDir, cwd);
             ensureCleanWorkingTree(cwd);
             const existing = resumeRun(
               existingRunId,
@@ -949,12 +1023,15 @@ program
               buildResumeSchemaOptions(
                 options.stopWhen,
                 existingMetadata.commitMessage,
+                options.workflow,
+                options.ledger,
               ),
             );
             const resumeStopWhen = existing.stopWhen;
             const resumeSchemaOptions = buildSchemaOptions(
               resumeStopWhen,
               existing.commitMessage,
+              existing.workflow,
             );
             runInfo = setupRun(
               existingRunId,
@@ -973,8 +1050,13 @@ program
             schemaOptions = buildSchemaOptions(
               effectiveStopWhen,
               effectiveCommitMessage,
+              options.workflow,
             );
-            runInfo = initializeNewBranch(prompt, cwd, schemaOptions);
+            runInfo = initializeNewBranch(
+              prompt,
+              cwd,
+              withLedgerOption(schemaOptions),
+            );
           } else {
             process.exit(0);
           }
@@ -985,7 +1067,11 @@ program
           return;
         }
 
-        runInfo = initializeNewBranch(prompt, cwd, schemaOptions);
+        runInfo = initializeNewBranch(
+          prompt,
+          cwd,
+          withLedgerOption(schemaOptions),
+        );
       }
 
       let sleepPreventionCleanup: (() => Promise<void>) | null = null;
@@ -1000,13 +1086,25 @@ program
         try {
           const sleepPrevention =
             initialSleepPrevention ??
-            (await startSleepPrevention(process.argv.slice(2), {
-              reexecEnv: persistedPrompt
-                ? {
-                    [GNHF_REEXEC_STDIN_PROMPT_FILE]: persistedPrompt.path,
-                  }
-                : undefined,
-            }));
+            (await startSleepPrevention(
+              pinUntilArg(process.argv.slice(2), options.until),
+              {
+                reexecEnv:
+                  persistedPrompt || createdWorktreePath
+                    ? {
+                        ...(persistedPrompt
+                          ? {
+                              [GNHF_REEXEC_STDIN_PROMPT_FILE]:
+                                persistedPrompt.path,
+                            }
+                          : {}),
+                        ...(createdWorktreePath
+                          ? { [GNHF_REEXEC_NEW_WORKTREE]: createdWorktreePath }
+                          : {}),
+                      }
+                    : undefined,
+              },
+            ));
           if (sleepPrevention.type === "reexeced") {
             reexeced = true;
             // The re-execed child now owns the worktree lifecycle. Do not let
@@ -1040,7 +1138,7 @@ program
               ? "resume"
               : "new";
 
-      const telemetryAgent = getTelemetryAgent(config.agent);
+      const telemetryAgent = "claude";
       telemetry.pageview("/run", {
         agent: telemetryAgent,
         mode: runMode,
@@ -1048,23 +1146,25 @@ program
 
       initDebugLog(runInfo.logPath);
       appendDebugLog("run:start", {
-        args: redactDebugArgs(process.argv.slice(2)),
+        args: process.argv.slice(2),
         runId: runInfo.runId,
         runDir: runInfo.runDir,
-        agent: redactAgentSpecForLogs(config.agent),
+        agent: telemetryAgent,
         promptLength: prompt.length,
         promptFromStdin,
         startIteration,
         maxIterations: options.maxIterations,
         maxTokens: options.maxTokens,
         maxRateLimitWaitMs: options.maxRateLimitWait,
+        until: options.until?.toISOString(),
         fallbackModel: options.fallbackModel,
+        effort: config.effort,
         stopWhen: effectiveStopWhen,
         commitMessage: effectiveCommitMessage,
+        workflow: runInfo.workflow,
+        ledgerPath: runInfo.ledgerPath,
         preventSleep: config.preventSleep,
-        agentArgsOverride: getNativeAgentName(config.agent)
-          ? config.agentArgsOverride?.[getNativeAgentName(config.agent)!]
-          : undefined,
+        agentArgsOverride: config.agentArgsOverride.claude,
         worktree: options.worktree,
         worktreePath,
         currentBranch: options.currentBranch,
@@ -1074,20 +1174,19 @@ program
         gnhfVersion: packageVersion,
       });
 
-      const model =
-        options.model ??
-        (nativeAgent ? config.agentModel?.[nativeAgent] : undefined);
+      const model = options.model ?? config.agentModel.claude;
       const agent = createAgent(
-        config.agent,
-        runInfo,
-        nativeAgent ? config.agentPathOverride[nativeAgent] : undefined,
-        nativeAgent ? config.agentArgsOverride?.[nativeAgent] : undefined,
+        config.agentPathOverride.claude,
+        config.agentArgsOverride.claude,
         {
           ...schemaOptions,
-          acpRegistryOverrides: config.acpRegistryOverrides,
-          model,
+          ...(model === undefined ? {} : { model }),
+          effort: config.effort,
+          agentsPath: config.agents,
+          appendSystemPromptPath: config.appendSystemPrompt,
         },
       );
+      const finished = getFinishedIterationCounts(runInfo);
       const orchestrator = new Orchestrator(
         { ...config, commitMessage: effectiveCommitMessage },
         agent,
@@ -1098,8 +1197,11 @@ program
         {
           maxIterations: options.maxIterations,
           maxTokens: options.maxTokens,
-          completedIterations: getCompletedIterationCount(runInfo),
+          completedIterations: finished.completed,
+          successCount: finished.successCount,
+          failCount: finished.failCount,
           stopWhen: effectiveStopWhen,
+          ...(options.until === undefined ? {} : { until: options.until }),
           ...(options.maxRateLimitWait === undefined
             ? {}
             : { maxRateLimitWaitMs: options.maxRateLimitWait }),
@@ -1144,7 +1246,7 @@ program
       const renderer = new Renderer(
         orchestrator,
         prompt,
-        config.agent,
+        agent.name,
         handleSigInt,
         { meteorFrequency: options.meteorFrequency },
       );
@@ -1246,7 +1348,7 @@ program
         }
 
         const exitSummary = renderExitSummary({
-          agentName: redactAgentSpecForLogs(config.agent),
+          agentName: agent.name,
           branchName: finalBranchName,
           elapsedMs: Date.now() - finalState.startTime.getTime(),
           status: finalState.status,
@@ -1268,11 +1370,15 @@ program
           terminalColumns: process.stdout.columns,
           hasPendingCommitFailure: finalState.hasPendingCommitFailure,
           sleepPreventionNotice,
+          ...(finalState.research === undefined
+            ? {}
+            : { research: finalState.research }),
         });
 
         appendDebugLog("run:complete", {
           signal: shutdownSignal,
           status: finalState.status,
+          research: finalState.research,
           iterations: finalState.currentIteration,
           successCount: finalState.successCount,
           failCount: finalState.failCount,

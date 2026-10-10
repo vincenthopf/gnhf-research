@@ -1,10 +1,19 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
+import {
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 
 vi.mock("./git.js", async (importOriginal) => {
   const actual = await importOriginal<typeof import("./git.js")>();
   return {
     ...actual,
-    commitAll: vi.fn(),
+    commitAll: vi.fn(() => true),
     getBranchCommitCount: vi.fn(() => 0),
     getCurrentBranch: vi.fn(() => "gnhf/run-abc"),
     getHeadCommit: vi.fn(() => "head123"),
@@ -51,6 +60,8 @@ import {
   type AgentResult,
 } from "./agents/types.js";
 import { CONVENTIONAL_COMMIT_MESSAGE } from "./commit-message.js";
+import { formatDeadline } from "./deadline.js";
+import { buildIterationPrompt } from "../templates/iteration-prompt.js";
 import type { Config } from "./config.js";
 import type { RunInfo } from "./run.js";
 
@@ -61,12 +72,12 @@ const mockResetHard = vi.mocked(resetHard);
 const mockAppendDebugLog = vi.mocked(appendDebugLog);
 
 const config: Config = {
-  agent: "claude",
   agentPathOverride: {},
   agentModel: {},
   agentArgsOverride: {},
-  acpRegistryOverrides: {},
+  effort: "medium",
   maxConsecutiveFailures: 3,
+  observerEvery: 5,
   preventSleep: true,
 };
 
@@ -83,6 +94,8 @@ const runInfo: RunInfo = {
   stopWhen: undefined,
   commitMessagePath: "/repo/.gnhf/runs/run-abc/commit-message",
   commitMessage: undefined,
+  workflowPath: "/repo/.gnhf/runs/run-abc/workflow",
+  workflow: "default",
 };
 
 function createSuccessResult(summary = "done"): AgentResult {
@@ -108,10 +121,9 @@ describe("Orchestrator output normalization", () => {
     vi.useRealTimers();
   });
 
-  it("redacts raw ACP agent specs in debug logs", async () => {
-    const rawAgent = "acp:./bin/dev-acp --profile ci --token secret";
+  it("names the agent in lifecycle debug logs", async () => {
     const agent: Agent = {
-      name: rawAgent,
+      name: "claude",
       run: vi.fn(async () => createSuccessResult()),
     };
     const orchestrator = new Orchestrator(
@@ -128,14 +140,11 @@ describe("Orchestrator output normalization", () => {
 
     expect(mockAppendDebugLog).toHaveBeenCalledWith(
       "orchestrator:start",
-      expect.objectContaining({ agent: "acp:custom" }),
+      expect.objectContaining({ agent: "claude" }),
     );
     expect(mockAppendDebugLog).toHaveBeenCalledWith(
       "agent:run:start",
-      expect.objectContaining({ agent: "acp:custom" }),
-    );
-    expect(JSON.stringify(mockAppendDebugLog.mock.calls)).not.toContain(
-      "secret",
+      expect.objectContaining({ agent: "claude" }),
     );
   });
 
@@ -314,10 +323,542 @@ describe("Orchestrator output normalization", () => {
   });
 });
 
+function createReportedFailureResult(): AgentResult {
+  const result = createSuccessResult();
+  return { ...result, output: { ...result.output, success: false } };
+}
+
+async function runWithFakeTimers(orchestrator: Orchestrator): Promise<void> {
+  let done = false;
+  const started = orchestrator.start().then(() => {
+    done = true;
+  });
+  while (!done) {
+    await vi.advanceTimersByTimeAsync(10 * 60_000);
+  }
+  await started;
+}
+
 describe("Orchestrator stop limits", () => {
   beforeEach(() => {
     vi.clearAllMocks();
     vi.useRealTimers();
+    mockCommitAll.mockReturnValue(true);
+  });
+
+  it("marks the last capped iteration as the final iteration", async () => {
+    const agent: Agent = {
+      name: "claude",
+      run: vi.fn(async () => createSuccessResult()),
+    };
+    const orchestrator = new Orchestrator(
+      config,
+      agent,
+      runInfo,
+      "ship it",
+      "/repo",
+      0,
+      { maxIterations: 2 },
+    );
+
+    await orchestrator.start();
+
+    const calls = vi.mocked(buildIterationPrompt).mock.calls;
+    expect(calls).toHaveLength(2);
+    expect(calls[0]![0].finalIteration).toBeUndefined();
+    expect(calls[1]![0].finalIteration).toEqual({
+      reason: "this is the last iteration allowed by --max-iterations (2)",
+      wrapUpOnly: false,
+    });
+  });
+
+  it("wraps up and stops after three successful iterations without a commit", async () => {
+    mockCommitAll.mockReturnValue(false);
+    const agent: Agent = {
+      name: "claude",
+      run: vi.fn(async () => createSuccessResult()),
+    };
+    const orchestrator = new Orchestrator(
+      config,
+      agent,
+      runInfo,
+      "ship it",
+      "/repo",
+      0,
+      { maxIterations: 10 },
+    );
+    const abort = vi.fn();
+    orchestrator.on("abort", abort);
+
+    await orchestrator.start();
+
+    expect(agent.run).toHaveBeenCalledTimes(4);
+    const calls = vi.mocked(buildIterationPrompt).mock.calls;
+    expect(calls[2]![0].finalIteration).toBeUndefined();
+    expect(calls[3]![0].finalIteration).toEqual({
+      reason: "the last 3 iterations made no progress (no commit)",
+      wrapUpOnly: true,
+    });
+    expect(abort).toHaveBeenCalledWith(
+      "no progress in 3 consecutive iterations",
+    );
+  });
+
+  it("uses maxConsecutiveFailures as the no-progress limit", async () => {
+    const agent: Agent = {
+      name: "claude",
+      run: vi.fn(async () => createReportedFailureResult()),
+    };
+    const orchestrator = new Orchestrator(
+      { ...config, maxConsecutiveFailures: 5 },
+      agent,
+      runInfo,
+      "ship it",
+      "/repo",
+      0,
+      { maxIterations: 10 },
+    );
+    const abort = vi.fn();
+    orchestrator.on("abort", abort);
+
+    await orchestrator.start();
+
+    expect(agent.run).toHaveBeenCalledTimes(6);
+    expect(
+      vi.mocked(buildIterationPrompt).mock.calls[5]![0].finalIteration,
+    ).toEqual({
+      reason: "the last 5 iterations made no progress (no commit)",
+      wrapUpOnly: true,
+    });
+    expect(abort).toHaveBeenCalledWith(
+      "no progress in 5 consecutive iterations",
+    );
+  });
+
+  it("still aborts on consecutive failures when an agent error breaks the no-progress streak", async () => {
+    vi.useFakeTimers();
+    let calls = 0;
+    const agent: Agent = {
+      name: "claude",
+      run: vi.fn(async () => {
+        calls++;
+        if (calls === 3) throw new Error("transient error");
+        return createReportedFailureResult();
+      }),
+    };
+    const orchestrator = new Orchestrator(
+      config,
+      agent,
+      runInfo,
+      "ship it",
+      "/repo",
+      0,
+      { maxIterations: 10 },
+    );
+    const abort = vi.fn();
+    orchestrator.on("abort", abort);
+
+    await runWithFakeTimers(orchestrator);
+
+    expect(agent.run).toHaveBeenCalledTimes(3);
+    expect(
+      vi
+        .mocked(buildIterationPrompt)
+        .mock.calls.map((call) => call[0].finalIteration),
+    ).toEqual([undefined, undefined, undefined]);
+    expect(abort).toHaveBeenCalledWith("3 consecutive failures");
+  });
+
+  it("does not reset the no-progress streak on an agent error", async () => {
+    vi.useFakeTimers();
+    mockCommitAll.mockReturnValue(false);
+    let calls = 0;
+    const agent: Agent = {
+      name: "claude",
+      run: vi.fn(async () => {
+        calls++;
+        if (calls === 3) throw new Error("transient error");
+        return createSuccessResult();
+      }),
+    };
+    const orchestrator = new Orchestrator(
+      config,
+      agent,
+      runInfo,
+      "ship it",
+      "/repo",
+      0,
+      { maxIterations: 10 },
+    );
+    const abort = vi.fn();
+    orchestrator.on("abort", abort);
+
+    await runWithFakeTimers(orchestrator);
+
+    expect(agent.run).toHaveBeenCalledTimes(5);
+    expect(
+      vi.mocked(buildIterationPrompt).mock.calls[4]![0].finalIteration
+        ?.wrapUpOnly,
+    ).toBe(true);
+    expect(abort).toHaveBeenCalledWith(
+      "no progress in 3 consecutive iterations",
+    );
+  });
+
+  it("restarts the no-progress streak after a commit failure", async () => {
+    mockCommitAll
+      .mockReturnValueOnce(false)
+      .mockReturnValueOnce(false)
+      .mockImplementationOnce(() => {
+        throw new CommitFailedError(new Error("hook failed"));
+      })
+      .mockReturnValueOnce(false)
+      .mockReturnValueOnce(false);
+    const agent: Agent = {
+      name: "claude",
+      run: vi.fn(async () => createSuccessResult()),
+    };
+    const orchestrator = new Orchestrator(
+      config,
+      agent,
+      runInfo,
+      "ship it",
+      "/repo",
+      0,
+      { maxIterations: 5 },
+    );
+    const abort = vi.fn();
+    orchestrator.on("abort", abort);
+
+    await orchestrator.start();
+
+    expect(agent.run).toHaveBeenCalledTimes(5);
+    expect(
+      vi
+        .mocked(buildIterationPrompt)
+        .mock.calls.map((call) => call[0].finalIteration?.wrapUpOnly),
+    ).toEqual([undefined, undefined, undefined, undefined, false]);
+    expect(abort).toHaveBeenCalledWith("max iterations reached (5)");
+  });
+
+  it("reports the no-progress stop even when the wrap-up iteration errors", async () => {
+    vi.useFakeTimers();
+    let calls = 0;
+    const agent: Agent = {
+      name: "claude",
+      run: vi.fn(async () => {
+        calls++;
+        if (calls === 4) throw new Error("wrap-up crashed");
+        return createReportedFailureResult();
+      }),
+    };
+    const orchestrator = new Orchestrator(
+      { ...config, maxConsecutiveFailures: 3 },
+      agent,
+      runInfo,
+      "ship it",
+      "/repo",
+      0,
+      { maxIterations: 10 },
+    );
+    const abort = vi.fn();
+    orchestrator.on("abort", abort);
+
+    await runWithFakeTimers(orchestrator);
+
+    expect(agent.run).toHaveBeenCalledTimes(4);
+    expect(abort).toHaveBeenCalledWith(
+      "no progress in 3 consecutive iterations",
+    );
+    expect(orchestrator.getState().lastAgentError).toBeNull();
+  });
+
+  it("wraps up instead of aborting on three reported failures", async () => {
+    const agent: Agent = {
+      name: "claude",
+      run: vi.fn(async () => createReportedFailureResult()),
+    };
+    const orchestrator = new Orchestrator(
+      config,
+      agent,
+      runInfo,
+      "ship it",
+      "/repo",
+      0,
+      { maxIterations: 10 },
+    );
+    const abort = vi.fn();
+    orchestrator.on("abort", abort);
+
+    await orchestrator.start();
+
+    expect(agent.run).toHaveBeenCalledTimes(4);
+    expect(
+      vi.mocked(buildIterationPrompt).mock.calls[3]![0].finalIteration,
+    ).toEqual({
+      reason: "the last 3 iterations made no progress (no commit)",
+      wrapUpOnly: true,
+    });
+    expect(abort).toHaveBeenCalledTimes(1);
+    expect(abort).toHaveBeenCalledWith(
+      "no progress in 3 consecutive iterations",
+    );
+  });
+
+  it("resets the no-progress streak when an iteration commits", async () => {
+    mockCommitAll
+      .mockReturnValueOnce(false)
+      .mockReturnValueOnce(false)
+      .mockReturnValueOnce(true)
+      .mockReturnValueOnce(false)
+      .mockReturnValueOnce(false);
+    const agent: Agent = {
+      name: "claude",
+      run: vi.fn(async () => createSuccessResult()),
+    };
+    const orchestrator = new Orchestrator(
+      config,
+      agent,
+      runInfo,
+      "ship it",
+      "/repo",
+      0,
+      { maxIterations: 5 },
+    );
+    const abort = vi.fn();
+    orchestrator.on("abort", abort);
+
+    await orchestrator.start();
+
+    expect(agent.run).toHaveBeenCalledTimes(5);
+    expect(
+      vi
+        .mocked(buildIterationPrompt)
+        .mock.calls.slice(0, 4)
+        .map((call) => call[0].finalIteration),
+    ).toEqual([undefined, undefined, undefined, undefined]);
+    expect(abort).toHaveBeenCalledWith("max iterations reached (5)");
+  });
+
+  it("runs one wrap-up iteration when the deadline has already passed", async () => {
+    const agent: Agent = {
+      name: "claude",
+      run: vi.fn(async () => createSuccessResult()),
+    };
+    const until = new Date(Date.now() - 60_000);
+    const orchestrator = new Orchestrator(
+      config,
+      agent,
+      runInfo,
+      "ship it",
+      "/repo",
+      0,
+      { until },
+    );
+    const abort = vi.fn();
+    orchestrator.on("abort", abort);
+
+    await orchestrator.start();
+
+    expect(agent.run).toHaveBeenCalledTimes(1);
+    const params = vi.mocked(buildIterationPrompt).mock.calls[0]![0];
+    expect(params.deadline).toBe(formatDeadline(until));
+    expect(params.finalIteration).toEqual({
+      reason: `the run deadline (${formatDeadline(until)}) has passed`,
+      wrapUpOnly: true,
+    });
+    expect(mockCommitAll).toHaveBeenCalledTimes(1);
+    expect(abort).toHaveBeenCalledWith(
+      `deadline reached (${formatDeadline(until)})`,
+    );
+  });
+
+  it("stops after the wrap-up iteration even when it fails", async () => {
+    const agent: Agent = {
+      name: "claude",
+      run: vi.fn(async () => ({
+        ...createSuccessResult(),
+        output: { ...createSuccessResult().output, success: false },
+      })),
+    };
+    const until = new Date(Date.now() - 60_000);
+    const orchestrator = new Orchestrator(
+      config,
+      agent,
+      runInfo,
+      "ship it",
+      "/repo",
+      0,
+      { until },
+    );
+    const abort = vi.fn();
+    orchestrator.on("abort", abort);
+
+    await orchestrator.start();
+
+    expect(agent.run).toHaveBeenCalledTimes(1);
+    expect(abort).toHaveBeenCalledWith(
+      `deadline reached (${formatDeadline(until)})`,
+    );
+  });
+
+  it("stops without waiting when the wrap-up iteration is rate-limited", async () => {
+    vi.useFakeTimers();
+    const until = new Date(Date.now() - 60_000);
+    let calls = 0;
+    const agent: Agent = {
+      name: "claude",
+      run: vi.fn(async () => {
+        calls++;
+        if (calls === 1) {
+          throw new RateLimitAgentError(
+            "claude usage limit reached",
+            "claude exited with code 1: usage limit",
+            new Date(Date.now() - 1_000),
+          );
+        }
+        return createSuccessResult();
+      }),
+    };
+    const orchestrator = new Orchestrator(
+      config,
+      agent,
+      runInfo,
+      "ship it",
+      "/repo",
+      0,
+      { until, maxRateLimitWaitMs: Infinity },
+    );
+    const abort = vi.fn();
+    orchestrator.on("abort", abort);
+
+    const startPromise = orchestrator.start();
+    await vi.waitFor(() => expect(abort).toHaveBeenCalled());
+    await startPromise;
+
+    expect(agent.run).toHaveBeenCalledTimes(1);
+    expect(abort).toHaveBeenCalledWith(
+      `deadline reached (${formatDeadline(until)}) before the usage limit resets`,
+    );
+  });
+
+  it("stops instead of waiting for a usage reset that lands after the deadline", async () => {
+    vi.useFakeTimers();
+    const until = new Date(Date.now() + 10 * 60_000);
+    const agent: Agent = {
+      name: "claude",
+      run: vi.fn(async () => {
+        throw new RateLimitAgentError(
+          "claude usage limit reached",
+          "claude exited with code 1: usage limit",
+          new Date(Date.now() + 2 * 60 * 60_000),
+        );
+      }),
+    };
+    const orchestrator = new Orchestrator(
+      config,
+      agent,
+      runInfo,
+      "ship it",
+      "/repo",
+      0,
+      { until },
+    );
+    const abort = vi.fn();
+    orchestrator.on("abort", abort);
+
+    await orchestrator.start();
+
+    expect(agent.run).toHaveBeenCalledTimes(1);
+    expect(orchestrator.getState().waitingUntil).toBeNull();
+    expect(abort).toHaveBeenCalledWith(
+      `deadline reached (${formatDeadline(until)}) before the usage limit resets`,
+    );
+  });
+
+  it("waits for a usage reset that lands before the deadline and then wraps up", async () => {
+    vi.useFakeTimers();
+    const until = new Date(Date.now() + 10 * 60_000);
+    let calls = 0;
+    const agent: Agent = {
+      name: "claude",
+      run: vi.fn(async () => {
+        calls++;
+        if (calls === 1) {
+          throw new RateLimitAgentError(
+            "claude usage limit reached",
+            "claude exited with code 1: usage limit",
+            new Date(Date.now() + 60_000),
+          );
+        }
+        if (calls === 2) vi.setSystemTime(until.getTime() + 1);
+        return createSuccessResult();
+      }),
+    };
+    const orchestrator = new Orchestrator(
+      config,
+      agent,
+      runInfo,
+      "ship it",
+      "/repo",
+      0,
+      { until },
+    );
+    const abort = vi.fn();
+    orchestrator.on("abort", abort);
+
+    const startPromise = orchestrator.start();
+    await vi.waitFor(() =>
+      expect(orchestrator.getState().status).toBe("waiting"),
+    );
+    await vi.advanceTimersByTimeAsync(3 * 60_000);
+    await startPromise;
+
+    expect(agent.run).toHaveBeenCalledTimes(3);
+    const finals = vi
+      .mocked(buildIterationPrompt)
+      .mock.calls.map(([params]) => params.finalIteration?.wrapUpOnly);
+    expect(finals).toEqual([undefined, undefined, true]);
+    expect(abort).toHaveBeenCalledWith(
+      `deadline reached (${formatDeadline(until)})`,
+    );
+  });
+
+  it("wraps up on the next iteration after the deadline passes mid-run", async () => {
+    const until = new Date(Date.now() + 60 * 60_000);
+    let calls = 0;
+    const agent: Agent = {
+      name: "claude",
+      run: vi.fn(async () => {
+        calls++;
+        if (calls === 2) vi.setSystemTime(until.getTime() + 1);
+        return createSuccessResult();
+      }),
+    };
+    vi.useFakeTimers({ toFake: ["Date"] });
+    const orchestrator = new Orchestrator(
+      config,
+      agent,
+      runInfo,
+      "ship it",
+      "/repo",
+      0,
+      { until, maxIterations: 10 },
+    );
+    const abort = vi.fn();
+    orchestrator.on("abort", abort);
+
+    await orchestrator.start();
+    vi.useRealTimers();
+
+    expect(agent.run).toHaveBeenCalledTimes(3);
+    const finals = vi
+      .mocked(buildIterationPrompt)
+      .mock.calls.map(([params]) => params.finalIteration?.wrapUpOnly);
+    expect(finals).toEqual([undefined, undefined, true]);
+    expect(abort).toHaveBeenCalledWith(
+      `deadline reached (${formatDeadline(until)})`,
+    );
   });
 
   it("aborts before starting when the max iteration cap is already reached", async () => {
@@ -536,7 +1077,7 @@ describe("Orchestrator stop limits", () => {
 
   it("does not commit when an agent resolves after triggering the token cap", async () => {
     const agent: Agent = {
-      name: "opencode",
+      name: "claude",
       run: vi.fn((_prompt, _cwd, options) => {
         options?.onUsage?.({
           inputTokens: 10,
@@ -583,7 +1124,7 @@ describe("Orchestrator stop limits", () => {
     // added to the budget. Input+output alone were 22% of the cap while the
     // run had already spent $48.
     const agent: Agent = {
-      name: "opencode",
+      name: "claude",
       run: vi.fn(
         (_prompt, _cwd, options) =>
           new Promise<AgentResult>((_resolve, reject) => {
@@ -627,7 +1168,7 @@ describe("Orchestrator stop limits", () => {
   it("accumulates cache tokens across iterations rather than overwriting them", async () => {
     let call = 0;
     const agent: Agent = {
-      name: "opencode",
+      name: "claude",
       run: vi.fn(async (_prompt, _cwd, options) => {
         call += 1;
         options?.onUsage?.({
@@ -674,7 +1215,7 @@ describe("Orchestrator stop limits", () => {
   it("marks in-flight usage as estimated until authoritative usage arrives", async () => {
     const observedEstimatedStates: boolean[] = [];
     const agent: Agent = {
-      name: "acp:test",
+      name: "claude",
       run: vi.fn(async (_prompt, _cwd, options) => {
         options?.onUsage?.({
           inputTokens: 4,
@@ -719,7 +1260,7 @@ describe("Orchestrator stop limits", () => {
 
     let callCount = 0;
     const agent: Agent = {
-      name: "acp:test",
+      name: "claude",
       run: vi.fn(async (_prompt, _cwd, options) => {
         callCount++;
         if (callCount === 1) {
@@ -1478,6 +2019,26 @@ describe("Orchestrator backoff behavior", () => {
       currentIteration: 1,
       completedIterations: 1,
       maxIterations: 1,
+    });
+  });
+
+  it("starts from the success and failure counts of earlier runs", () => {
+    const agent: Agent = { name: "claude", run: vi.fn() };
+    const orchestrator = new Orchestrator(
+      config,
+      agent,
+      runInfo,
+      "ship it",
+      "/repo",
+      5,
+      { completedIterations: 5, successCount: 3, failCount: 2 },
+    );
+
+    expect(orchestrator.getState()).toMatchObject({
+      currentIteration: 5,
+      completedIterations: 5,
+      successCount: 3,
+      failCount: 2,
     });
   });
 
@@ -2619,5 +3180,1172 @@ describe("Orchestrator crash resilience", () => {
     expect(iterationEnd).toHaveBeenCalledTimes(1);
     expect(abort).toHaveBeenCalledWith("push failed: remote rejected push");
     expect(orchestrator.getState().status).toBe("aborted");
+  });
+});
+
+describe("Orchestrator research workflow", () => {
+  const researchRunInfo: RunInfo = { ...runInfo, workflow: "research" };
+  const usage = {
+    inputTokens: 0,
+    outputTokens: 0,
+    cacheReadTokens: 0,
+    cacheCreationTokens: 0,
+  };
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    vi.useRealTimers();
+    mockCommitAll.mockReturnValue(true);
+  });
+
+  function researchAgent(success: boolean): Agent {
+    return {
+      name: "claude",
+      run: vi.fn(async () => ({
+        output: {
+          success,
+          summary: "studied cache",
+          key_changes_made: ["ledger.md"],
+          key_learnings: ["cold start dominates"],
+          evidence_origin: "executed" as const,
+          goals_changed: ["G1", "G2"],
+          contracts_run: ["N5-1"],
+          boundary: "does not cover warm starts",
+        },
+        usage,
+      })),
+    };
+  }
+
+  it("passes the research workflow to the iteration prompt", async () => {
+    const orchestrator = new Orchestrator(
+      config,
+      researchAgent(true),
+      researchRunInfo,
+      "study it",
+      "/repo",
+      0,
+      { maxIterations: 1 },
+    );
+
+    await orchestrator.start();
+
+    expect(vi.mocked(buildIterationPrompt).mock.calls[0]![0].workflow).toBe(
+      "research",
+    );
+  });
+
+  it("passes the default workflow to the iteration prompt", async () => {
+    const orchestrator = new Orchestrator(
+      config,
+      researchAgent(true),
+      runInfo,
+      "ship it",
+      "/repo",
+      0,
+      { maxIterations: 1 },
+    );
+
+    await orchestrator.start();
+
+    expect(vi.mocked(buildIterationPrompt).mock.calls[0]![0].workflow).toBe(
+      "default",
+    );
+  });
+
+  it("records research evidence in notes and the iteration end log", async () => {
+    const orchestrator = new Orchestrator(
+      config,
+      researchAgent(true),
+      researchRunInfo,
+      "study it",
+      "/repo",
+      0,
+      { maxIterations: 1 },
+    );
+
+    await orchestrator.start();
+
+    const evidence = {
+      evidenceOrigin: "executed",
+      goalsChanged: ["G1", "G2"],
+      contractsRun: ["N5-1"],
+      boundary: "does not cover warm starts",
+    };
+    expect(mockAppendNotes).toHaveBeenCalledWith(
+      researchRunInfo.notesPath,
+      1,
+      "studied cache",
+      ["ledger.md"],
+      ["cold start dominates"],
+      evidence,
+    );
+    expect(mockAppendDebugLog).toHaveBeenCalledWith(
+      "iteration:end",
+      expect.objectContaining(evidence),
+    );
+  });
+
+  it("records research evidence for a reported failure", async () => {
+    const orchestrator = new Orchestrator(
+      config,
+      researchAgent(false),
+      researchRunInfo,
+      "study it",
+      "/repo",
+      0,
+      { maxIterations: 1 },
+    );
+
+    await orchestrator.start();
+
+    expect(mockAppendNotes).toHaveBeenCalledWith(
+      researchRunInfo.notesPath,
+      1,
+      "[FAIL] studied cache",
+      [],
+      ["cold start dominates"],
+      expect.objectContaining({ evidenceOrigin: "executed" }),
+    );
+  });
+
+  it("records research evidence when the commit fails", async () => {
+    mockCommitAll.mockImplementationOnce(() => {
+      throw new CommitFailedError(new Error("hook failed"));
+    });
+    const orchestrator = new Orchestrator(
+      config,
+      researchAgent(true),
+      researchRunInfo,
+      "study it",
+      "/repo",
+      0,
+      { maxIterations: 1 },
+    );
+
+    await orchestrator.start();
+
+    expect(mockAppendNotes).toHaveBeenCalledWith(
+      researchRunInfo.notesPath,
+      1,
+      "[ERROR] git commit failed; asking agent to repair the workspace",
+      [],
+      ["hook failed"],
+      expect.objectContaining({ evidenceOrigin: "executed" }),
+    );
+    expect(mockAppendDebugLog).toHaveBeenCalledWith(
+      "iteration:end",
+      expect.objectContaining({ success: false, evidenceOrigin: "executed" }),
+    );
+  });
+
+  it("coerces malformed research fields instead of failing after the commit", async () => {
+    const agent: Agent = {
+      name: "claude",
+      run: vi.fn(
+        async () =>
+          ({
+            output: {
+              success: true,
+              summary: "studied cache",
+              key_changes_made: ["ledger.md"],
+              key_learnings: [],
+              evidence_origin: 5,
+              goals_changed: "G3",
+              contracts_run: null,
+              boundary: null,
+            },
+            usage,
+          }) as unknown as AgentResult,
+      ),
+    };
+    const orchestrator = new Orchestrator(
+      config,
+      agent,
+      researchRunInfo,
+      "study it",
+      "/repo",
+      0,
+      { maxIterations: 1 },
+    );
+    const iterationEnd = vi.fn();
+    orchestrator.on("iteration:end", iterationEnd);
+
+    await orchestrator.start();
+
+    expect(mockAppendNotes).toHaveBeenCalledWith(
+      researchRunInfo.notesPath,
+      1,
+      "studied cache",
+      ["ledger.md"],
+      [],
+      {
+        evidenceOrigin: "none",
+        goalsChanged: ["G3"],
+        contractsRun: [],
+        boundary: "",
+      },
+    );
+    expect(iterationEnd.mock.calls[0]![0].success).toBe(true);
+  });
+
+  it("keeps default-mode notes and iteration end log free of evidence", async () => {
+    const orchestrator = new Orchestrator(
+      config,
+      researchAgent(true),
+      runInfo,
+      "ship it",
+      "/repo",
+      0,
+      { maxIterations: 1 },
+    );
+
+    await orchestrator.start();
+
+    expect(mockAppendNotes.mock.calls[0]).toHaveLength(5);
+    const endCall = mockAppendDebugLog.mock.calls.find(
+      ([event]) => event === "iteration:end",
+    );
+    expect(endCall![1]).not.toHaveProperty("evidenceOrigin");
+  });
+});
+
+describe("Orchestrator research ledger", () => {
+  const usage = {
+    inputTokens: 0,
+    outputTokens: 0,
+    cacheReadTokens: 0,
+    cacheCreationTokens: 0,
+  };
+  const r1 = `${JSON.stringify({ id: "r1", iteration: 1, evidence_origin: "executed", claim: "cache halves cold start" })}\n`;
+  const r1Rewritten = `${JSON.stringify({ id: "r1", iteration: 1, evidence_origin: "executed", claim: "rewritten" })}\n`;
+  const r2 = `${JSON.stringify({ id: "r2", iteration: 2, evidence_origin: "source_read", claim: "paper agrees" })}\n`;
+  let dir: string;
+  let ledgerInfo: RunInfo;
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    vi.useRealTimers();
+    mockCommitAll.mockReturnValue(true);
+    dir = mkdtempSync(join(tmpdir(), "gnhf-ledger-"));
+    const runDir = join(dir, ".gnhf", "runs", "run-abc");
+    mkdirSync(join(runDir, "ledger"), { recursive: true });
+    ledgerInfo = {
+      ...runInfo,
+      runDir,
+      workflow: "research",
+      ledgerPath: join(runDir, "ledger", "records.jsonl"),
+    };
+    writeFileSync(ledgerInfo.ledgerPath!, r1, "utf-8");
+  });
+
+  afterEach(() => {
+    mockResetHard.mockReset();
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  function ledgerAgent(
+    steps: Array<{
+      ledger: (current: string) => string;
+      success?: boolean;
+      stop?: boolean;
+    }>,
+  ): Agent {
+    let call = 0;
+    return {
+      name: "claude",
+      run: vi.fn(async () => {
+        const step = steps[Math.min(call, steps.length - 1)]!;
+        call++;
+        const path = ledgerInfo.ledgerPath!;
+        writeFileSync(path, step.ledger(readFileSync(path, "utf-8")), "utf-8");
+        return {
+          output: {
+            success: step.success ?? true,
+            summary: "studied cache",
+            key_changes_made: ["ledger"],
+            key_learnings: ["learning"],
+            evidence_origin: "executed" as const,
+            goals_changed: [],
+            contracts_run: [],
+            boundary: "b",
+            ...(step.stop === undefined
+              ? {}
+              : { should_fully_stop: step.stop }),
+          },
+          usage,
+        };
+      }),
+    };
+  }
+
+  const validatedPath = () =>
+    join(ledgerInfo.runDir, "ledger", "validated.jsonl");
+
+  function orchestratorFor(agent: Agent, maxIterations: number): Orchestrator {
+    return new Orchestrator(config, agent, ledgerInfo, "study it", dir, 0, {
+      maxIterations,
+    });
+  }
+
+  it("passes the ledger path to the iteration prompt", async () => {
+    await orchestratorFor(ledgerAgent([{ ledger: (c) => c }]), 1).start();
+
+    expect(vi.mocked(buildIterationPrompt)).toHaveBeenCalledWith(
+      expect.objectContaining({ ledgerPath: ledgerInfo.ledgerPath }),
+    );
+  });
+
+  it("commits an iteration that appends valid records", async () => {
+    const orchestrator = orchestratorFor(
+      ledgerAgent([{ ledger: (c) => c + r2 }]),
+      1,
+    );
+
+    await orchestrator.start();
+
+    expect(orchestrator.getState().iterations[0]!.success).toBe(true);
+    expect(mockCommitAll).toHaveBeenCalledTimes(1);
+    expect(readFileSync(ledgerInfo.ledgerPath!, "utf-8")).toBe(r1 + r2);
+    expect(mockAppendDebugLog).toHaveBeenCalledWith(
+      "ledger:valid",
+      expect.objectContaining({ iteration: 1, records: 2 }),
+    );
+  });
+
+  it("fails an iteration that rewrites an earlier line and restores the ledger", async () => {
+    const orchestrator = orchestratorFor(
+      ledgerAgent([{ ledger: () => r1Rewritten + r2 }]),
+      1,
+    );
+
+    await orchestrator.start();
+
+    const record = orchestrator.getState().iterations[0]!;
+    expect(record.success).toBe(false);
+    expect(record.summary).toBe(
+      "ledger validation failed: line 1 changed (id r1)",
+    );
+    expect(mockCommitAll).not.toHaveBeenCalled();
+    expect(mockResetHard).toHaveBeenCalledTimes(1);
+    expect(readFileSync(ledgerInfo.ledgerPath!, "utf-8")).toBe(r1);
+    const rejectedPath = join(
+      ledgerInfo.runDir,
+      "ledger",
+      "rejected-iteration-1.jsonl",
+    );
+    expect(readFileSync(rejectedPath, "utf-8")).toBe(r1Rewritten + r2);
+    expect(mockAppendNotes).toHaveBeenCalledWith(
+      ledgerInfo.notesPath,
+      1,
+      "[FAIL] ledger validation failed: line 1 changed (id r1)",
+      [],
+      expect.arrayContaining([
+        "Agent reported success: studied cache",
+        `Rejected ledger saved to ${rejectedPath}`,
+      ]),
+      expect.objectContaining({ evidenceOrigin: "executed" }),
+    );
+    expect(mockAppendDebugLog).toHaveBeenCalledWith(
+      "ledger:invalid",
+      expect.objectContaining({
+        iteration: 1,
+        reason: "line 1 changed (id r1)",
+        rejectedPath,
+      }),
+    );
+    expect(orchestrator.getState().lastAgentError).toBeNull();
+  });
+
+  it("restores the snapshot after resetHard reverts or removes the ledger", async () => {
+    mockResetHard.mockImplementation(() => {
+      rmSync(ledgerInfo.ledgerPath!, { force: true });
+    });
+    const orchestrator = orchestratorFor(
+      ledgerAgent([{ ledger: () => r2 }]),
+      1,
+    );
+
+    await orchestrator.start();
+
+    expect(orchestrator.getState().iterations[0]!.summary).toBe(
+      "ledger validation failed: line 1 changed (id r1)",
+    );
+    expect(readFileSync(ledgerInfo.ledgerPath!, "utf-8")).toBe(r1);
+  });
+
+  it("tells the next iteration why the ledger was rejected, once", async () => {
+    const agent = ledgerAgent([
+      { ledger: () => r1Rewritten },
+      { ledger: (c) => c + r2 },
+      { ledger: (c) => c },
+    ]);
+
+    await orchestratorFor(agent, 3).start();
+
+    const prompts = vi
+      .mocked(agent.run)
+      .mock.calls.map((call) => String(call[0]));
+    expect(prompts[0]).not.toContain("## Previous Ledger Rejection");
+    expect(prompts[1]).toContain("## Previous Ledger Rejection");
+    expect(prompts[1]).toContain("line 1 changed (id r1)");
+    expect(prompts[1]).toContain(
+      join(ledgerInfo.runDir, "ledger", "rejected-iteration-1.jsonl"),
+    );
+    expect(prompts[2]).not.toContain("## Previous Ledger Rejection");
+    expect(readFileSync(ledgerInfo.ledgerPath!, "utf-8")).toBe(r1 + r2);
+  });
+
+  it("rejects an invalid ledger from a reported failure", async () => {
+    const orchestrator = orchestratorFor(
+      ledgerAgent([{ ledger: (c) => `${c}not json\n`, success: false }]),
+      1,
+    );
+
+    await orchestrator.start();
+
+    expect(orchestrator.getState().iterations[0]!.summary).toBe(
+      "ledger validation failed: line 2 is not valid JSON",
+    );
+    expect(readFileSync(ledgerInfo.ledgerPath!, "utf-8")).toBe(r1);
+    expect(
+      readFileSync(
+        join(ledgerInfo.runDir, "ledger", "rejected-iteration-1.jsonl"),
+        "utf-8",
+      ),
+    ).toBe(`${r1}not json\n`);
+  });
+
+  it("keeps valid records from a reported failure even when resetHard reverts the ledger", async () => {
+    mockResetHard.mockImplementation(() => {
+      writeFileSync(ledgerInfo.ledgerPath!, r1, "utf-8");
+    });
+    const orchestrator = orchestratorFor(
+      ledgerAgent([{ ledger: (c) => c + r2, success: false }]),
+      1,
+    );
+
+    await orchestrator.start();
+
+    expect(orchestrator.getState().iterations[0]!.summary).toBe(
+      "studied cache",
+    );
+    expect(mockResetHard).toHaveBeenCalledTimes(1);
+    expect(readFileSync(ledgerInfo.ledgerPath!, "utf-8")).toBe(r1 + r2);
+  });
+
+  it("rejects an invalid ledger left by an agent error", async () => {
+    mockResetHard.mockImplementation(() => {
+      rmSync(ledgerInfo.ledgerPath!, { force: true });
+    });
+    const agent: Agent = {
+      name: "claude",
+      run: vi.fn(async () => {
+        writeFileSync(ledgerInfo.ledgerPath!, r2, "utf-8");
+        throw new Error("agent crashed");
+      }),
+    };
+    const orchestrator = orchestratorFor(agent, 1);
+
+    await orchestrator.start();
+
+    expect(orchestrator.getState().iterations[0]!.summary).toBe(
+      "agent crashed",
+    );
+    expect(readFileSync(ledgerInfo.ledgerPath!, "utf-8")).toBe(r1);
+    expect(
+      readFileSync(
+        join(ledgerInfo.runDir, "ledger", "rejected-iteration-1.jsonl"),
+        "utf-8",
+      ),
+    ).toBe(r2);
+    expect(
+      mockAppendDebugLog.mock.calls.some(
+        ([event]) => event === "ledger:restored",
+      ),
+    ).toBe(false);
+  });
+
+  it("counts a ledger rejection as no progress, not as an agent error", async () => {
+    const orchestrator = orchestratorFor(
+      ledgerAgent([{ ledger: () => r1Rewritten }]),
+      1,
+    );
+
+    await orchestrator.start();
+
+    const state = orchestrator.getState();
+    expect(state.failCount).toBe(1);
+    expect(state.consecutiveFailures).toBe(1);
+    expect(state.consecutiveErrors).toBe(0);
+  });
+
+  it("does not read or validate a ledger outside research mode", async () => {
+    const agent = ledgerAgent([{ ledger: () => r1Rewritten }]);
+    const orchestrator = new Orchestrator(
+      config,
+      agent,
+      { ...ledgerInfo, workflow: "default", ledgerPath: undefined },
+      "ship it",
+      dir,
+      0,
+      { maxIterations: 1 },
+    );
+
+    await orchestrator.start();
+
+    expect(orchestrator.getState().iterations[0]!.success).toBe(true);
+    expect(
+      mockAppendDebugLog.mock.calls.some(([event]) =>
+        String(event).startsWith("ledger:"),
+      ),
+    ).toBe(false);
+  });
+
+  it("records the validated ledger beside the run", async () => {
+    await orchestratorFor(ledgerAgent([{ ledger: (c) => c + r2 }]), 1).start();
+
+    expect(readFileSync(validatedPath(), "utf-8")).toBe(r1 + r2);
+  });
+
+  it("never overwrites an earlier rejected file", async () => {
+    const earlier = join(
+      ledgerInfo.runDir,
+      "ledger",
+      "rejected-iteration-1.jsonl",
+    );
+    writeFileSync(earlier, "earlier rejection", "utf-8");
+
+    await orchestratorFor(
+      ledgerAgent([{ ledger: () => r1Rewritten }]),
+      1,
+    ).start();
+
+    expect(readFileSync(earlier, "utf-8")).toBe("earlier rejection");
+    expect(
+      readFileSync(
+        join(ledgerInfo.runDir, "ledger", "rejected-iteration-1-2.jsonl"),
+        "utf-8",
+      ),
+    ).toBe(r1Rewritten);
+  });
+
+  it("ignores should_fully_stop from an iteration whose ledger was rejected", async () => {
+    const agent = ledgerAgent([
+      { ledger: () => r1Rewritten, stop: true },
+      { ledger: (c) => c + r2 },
+    ]);
+    const orchestrator = new Orchestrator(
+      config,
+      agent,
+      ledgerInfo,
+      "study it",
+      dir,
+      0,
+      { maxIterations: 2, stopWhen: "done" },
+    );
+
+    await orchestrator.start();
+
+    expect(agent.run).toHaveBeenCalledTimes(2);
+    expect(orchestrator.getState().iterations[1]!.success).toBe(true);
+  });
+
+  it("rejects a partial line left by an aborted iteration at the next start instead of failing every iteration", async () => {
+    const partial = `${r1}{"id":"r2","itera`;
+    const aborting: Agent = {
+      name: "claude",
+      run: vi.fn(async () => {
+        writeFileSync(ledgerInfo.ledgerPath!, partial, "utf-8");
+        throw new PermanentAgentError("auth failed", "auth failed");
+      }),
+    };
+    await orchestratorFor(aborting, 3).start();
+
+    const record = (id: string) =>
+      `${JSON.stringify({ id, iteration: 1, evidence_origin: "none", claim: id })}\n`;
+    const agent = ledgerAgent([
+      { ledger: (c) => c + r2 },
+      { ledger: (c) => c + record("r3") },
+      { ledger: (c) => c + record("r4") },
+    ]);
+    const later = orchestratorFor(agent, 3);
+    await later.start();
+
+    const iterations = later.getState().iterations;
+    expect(iterations.map((record) => record.success)).toEqual([
+      true,
+      true,
+      true,
+    ]);
+    const rejectedPath = join(
+      ledgerInfo.runDir,
+      "ledger",
+      "rejected-before-iteration-1.jsonl",
+    );
+    expect(readFileSync(rejectedPath, "utf-8")).toBe(partial);
+    const prompts = vi
+      .mocked(agent.run)
+      .mock.calls.map((call) => String(call[0]));
+    expect(prompts[0]).toContain("## Previous Ledger Rejection");
+    expect(prompts[0]).toContain("made outside a checked iteration");
+    expect(prompts[0]).toContain(rejectedPath);
+    expect(prompts[1]).not.toContain("## Previous Ledger Rejection");
+    expect(mockAppendDebugLog).toHaveBeenCalledWith(
+      "ledger:invalid",
+      expect.objectContaining({ iteration: 1, rejectedPath }),
+    );
+    expect(readFileSync(ledgerInfo.ledgerPath!, "utf-8")).toBe(
+      r1 + r2 + record("r3") + record("r4"),
+    );
+  });
+
+  it("keeps valid records from a reported failure when a later iteration aborts and resetHard reverts the ledger", async () => {
+    mockResetHard.mockImplementation(() => {
+      writeFileSync(ledgerInfo.ledgerPath!, r1, "utf-8");
+    });
+    let call = 0;
+    const agent: Agent = {
+      name: "claude",
+      run: vi.fn(async () => {
+        call++;
+        if (call === 2) {
+          throw new PermanentAgentError("auth failed", "auth failed");
+        }
+        writeFileSync(ledgerInfo.ledgerPath!, r1 + r2, "utf-8");
+        return {
+          output: {
+            success: false,
+            summary: "dead end",
+            key_changes_made: [],
+            key_learnings: [],
+            evidence_origin: "executed" as const,
+            goals_changed: [],
+            contracts_run: [],
+            boundary: "b",
+          },
+          usage,
+        };
+      }),
+    };
+    const orchestrator = orchestratorFor(agent, 3);
+
+    await orchestrator.start();
+
+    expect(orchestrator.getState().status).toBe("aborted");
+    expect(readFileSync(ledgerInfo.ledgerPath!, "utf-8")).toBe(r1 + r2);
+    expect(readFileSync(validatedPath(), "utf-8")).toBe(r1 + r2);
+    expect(mockAppendDebugLog).toHaveBeenCalledWith(
+      "ledger:restored",
+      expect.anything(),
+    );
+  });
+
+  it("accepts valid records left by an aborted iteration without a rejection", async () => {
+    const aborting: Agent = {
+      name: "claude",
+      run: vi.fn(async () => {
+        writeFileSync(ledgerInfo.ledgerPath!, r1 + r2, "utf-8");
+        throw new PermanentAgentError("auth failed", "auth failed");
+      }),
+    };
+    await orchestratorFor(aborting, 1).start();
+    const r3 = `${JSON.stringify({ id: "r3", iteration: 1, evidence_origin: "none", claim: "c3" })}\n`;
+    const agent = ledgerAgent([{ ledger: (c) => c + r3 }]);
+
+    await orchestratorFor(agent, 1).start();
+
+    expect(String(vi.mocked(agent.run).mock.calls[0]![0])).not.toContain(
+      "## Previous Ledger Rejection",
+    );
+    expect(readFileSync(ledgerInfo.ledgerPath!, "utf-8")).toBe(r1 + r2 + r3);
+  });
+
+  it("restores the validated ledger after a stop resets the workspace", async () => {
+    mockResetHard.mockImplementation(() => {
+      rmSync(ledgerInfo.ledgerPath!, { force: true });
+    });
+    let started!: () => void;
+    const running = new Promise<void>((resolve) => {
+      started = resolve;
+    });
+    const agent: Agent = {
+      name: "claude",
+      run: vi.fn(
+        (_prompt, _cwd, options) =>
+          new Promise<AgentResult>((_resolve, reject) => {
+            writeFileSync(ledgerInfo.ledgerPath!, r1 + r2, "utf-8");
+            options?.signal?.addEventListener("abort", () =>
+              reject(new Error("Agent was aborted")),
+            );
+            started();
+          }),
+      ),
+    };
+    const orchestrator = orchestratorFor(agent, 1);
+
+    const done = orchestrator.start();
+    await running;
+    orchestrator.stop();
+    await done;
+
+    expect(mockResetHard).toHaveBeenCalled();
+    expect(readFileSync(ledgerInfo.ledgerPath!, "utf-8")).toBe(r1);
+  });
+});
+
+describe("Orchestrator research stats and stall signal", () => {
+  const usage = {
+    inputTokens: 0,
+    outputTokens: 0,
+    cacheReadTokens: 0,
+    cacheCreationTokens: 0,
+  };
+  let dir: string;
+  let statsInfo: RunInfo;
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    vi.useRealTimers();
+    mockCommitAll.mockReturnValue(true);
+    dir = mkdtempSync(join(tmpdir(), "gnhf-research-stats-"));
+    const runDir = join(dir, ".gnhf", "runs", "run-abc");
+    mkdirSync(join(runDir, "ledger"), { recursive: true });
+    statsInfo = {
+      ...runInfo,
+      runDir,
+      logPath: join(runDir, "gnhf.log"),
+      workflow: "research",
+      ledgerPath: join(runDir, "ledger", "records.jsonl"),
+    };
+    writeFileSync(statsInfo.ledgerPath!, "", "utf-8");
+  });
+
+  afterEach(() => {
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  type Step = {
+    origin: "executed" | "source_read" | "reasoning_only" | "none";
+    goals?: string[];
+    contracts?: string[];
+    records?: Record<string, unknown>[];
+    success?: boolean;
+    rewriteLedger?: string;
+    rateLimited?: boolean;
+  };
+
+  function evidenceAgent(steps: Step[]): Agent {
+    let call = 0;
+    return {
+      name: "claude",
+      run: vi.fn(async () => {
+        const step = steps[Math.min(call, steps.length - 1)]!;
+        call++;
+        if (step.rateLimited === true) {
+          throw new RateLimitAgentError(
+            "claude usage limit reached",
+            "claude exited with code 1: usage limit",
+            null,
+          );
+        }
+        for (const record of step.records ?? []) {
+          writeFileSync(
+            statsInfo.ledgerPath!,
+            `${readFileSync(statsInfo.ledgerPath!, "utf-8")}${JSON.stringify(record)}\n`,
+            "utf-8",
+          );
+        }
+        if (step.rewriteLedger !== undefined) {
+          writeFileSync(statsInfo.ledgerPath!, step.rewriteLedger, "utf-8");
+        }
+        return {
+          output: {
+            success: step.success ?? true,
+            summary: "studied",
+            key_changes_made: ["x"],
+            key_learnings: [],
+            evidence_origin: step.origin,
+            goals_changed: step.goals ?? ["G1"],
+            contracts_run: step.contracts ?? [],
+            boundary: "b",
+          },
+          usage,
+        };
+      }),
+    };
+  }
+
+  function promptParams(): Array<Record<string, unknown>> {
+    return vi
+      .mocked(buildIterationPrompt)
+      .mock.calls.map(([params]) => params as Record<string, unknown>);
+  }
+
+  function run(
+    agent: Agent,
+    maxIterations: number,
+    overrides: Partial<Config> = {},
+    info: RunInfo = statsInfo,
+  ): Orchestrator {
+    return new Orchestrator(
+      { ...config, ...overrides },
+      agent,
+      info,
+      "study it",
+      dir,
+      0,
+      { maxIterations },
+    );
+  }
+
+  it("exposes research stats computed from iterations and the validated ledger", async () => {
+    const record = (id: string, extra: Record<string, unknown> = {}) => ({
+      id,
+      iteration: 1,
+      evidence_origin: "executed",
+      claim: `claim ${id}`,
+      ...extra,
+    });
+    const orchestrator = run(
+      evidenceAgent([
+        {
+          origin: "executed",
+          records: [
+            record("c1", { type: "contract", boundary: "b" }),
+            record("c2", { type: "contract", boundary: "b" }),
+            record("c3", { type: "contract" }),
+            record("r1"),
+          ],
+        },
+        { origin: "reasoning_only", goals: [], contracts: ["c1"] },
+        {
+          origin: "source_read",
+          goals: [],
+          records: [record("r2", { reframes: "c2", boundary: "b" })],
+        },
+      ]),
+      3,
+    );
+
+    await orchestrator.start();
+
+    expect(orchestrator.getState().research).toEqual({
+      executed: 1,
+      sourceRead: 1,
+      reasoningOnly: 1,
+      noEvidence: 0,
+      goalsStale: 2,
+      reasoningStreak: 0,
+      openContracts: 1,
+      missingBoundary: 1,
+    });
+  });
+
+  it("does not close contracts or reset goals stale from failed or ledger-rejected iterations", async () => {
+    const contract = {
+      id: "c1",
+      iteration: 1,
+      evidence_origin: "none",
+      claim: "run c1",
+      type: "contract",
+      boundary: "b",
+    };
+    const orchestrator = run(
+      evidenceAgent([
+        { origin: "executed", goals: [], records: [contract] },
+        {
+          origin: "executed",
+          goals: ["G1"],
+          contracts: ["c1"],
+          rewriteLedger: `${JSON.stringify({ ...contract, claim: "edited" })}\n`,
+        },
+        {
+          origin: "executed",
+          goals: ["G1"],
+          contracts: ["c1"],
+          success: false,
+        },
+      ]),
+      3,
+    );
+
+    await orchestrator.start();
+
+    expect(orchestrator.getState().iterations.map((i) => i.success)).toEqual([
+      true,
+      false,
+      false,
+    ]);
+    expect(orchestrator.getState().iterations[1]!.summary).toMatch(
+      /^ledger validation failed/,
+    );
+    expect(orchestrator.getState().research).toMatchObject({
+      executed: 3,
+      goalsStale: 3,
+      openContracts: 1,
+    });
+  });
+
+  it("logs success in iteration:end so a resume ignores failed iterations", async () => {
+    const orchestrator = run(
+      evidenceAgent([
+        {
+          origin: "executed",
+          goals: ["G1"],
+          contracts: ["c1"],
+          success: false,
+        },
+      ]),
+      1,
+    );
+
+    await orchestrator.start();
+
+    expect(mockAppendDebugLog).toHaveBeenCalledWith(
+      "iteration:end",
+      expect.objectContaining({
+        iteration: 1,
+        success: false,
+        contractsRun: ["c1"],
+      }),
+    );
+  });
+
+  it("refreshes ledger stats from the pre-iteration ledger check", async () => {
+    let openContractsDuringRun: number | undefined;
+    const agent = evidenceAgent([{ origin: "executed" }]);
+    const runAgent = agent.run;
+    agent.run = vi.fn(async (...args: Parameters<Agent["run"]>) => {
+      openContractsDuringRun = orchestrator.getState().research?.openContracts;
+      return runAgent(...args);
+    });
+    const orchestrator = run(agent, 1);
+    writeFileSync(
+      statsInfo.ledgerPath!,
+      `${JSON.stringify({ id: "c1", iteration: 0, evidence_origin: "none", claim: "next", type: "contract", boundary: "b" })}\n`,
+      "utf-8",
+    );
+
+    expect(orchestrator.getState().research?.openContracts).toBe(0);
+
+    await orchestrator.start();
+
+    expect(openContractsDuringRun).toBe(1);
+  });
+
+  it("logs research:observer once per iteration, also across rate-limit retries", async () => {
+    const orchestrator = new Orchestrator(
+      { ...config, observerEvery: 2 },
+      evidenceAgent([
+        { origin: "executed" },
+        { origin: "executed", rateLimited: true },
+        { origin: "executed" },
+      ]),
+      statsInfo,
+      "study it",
+      dir,
+      0,
+      { maxIterations: 3, fallbackModel: "claude-haiku" },
+    );
+
+    await orchestrator.start();
+
+    expect(promptParams().map((p) => p.observerPass)).toEqual([
+      undefined,
+      "iteration 2 is a multiple of observerEvery (2)",
+      "iteration 2 is a multiple of observerEvery (2)",
+      undefined,
+    ]);
+    expect(
+      mockAppendDebugLog.mock.calls.filter(
+        ([event]) => event === "research:observer",
+      ),
+    ).toEqual([
+      [
+        "research:observer",
+        {
+          iteration: 2,
+          reasons: ["iteration 2 is a multiple of observerEvery (2)"],
+        },
+      ],
+    ]);
+  });
+
+  it("leaves research stats out of the default workflow state", async () => {
+    const orchestrator = run(
+      evidenceAgent([{ origin: "executed" }]),
+      1,
+      {},
+      { ...statsInfo, workflow: "default", ledgerPath: undefined },
+    );
+
+    await orchestrator.start();
+
+    expect(orchestrator.getState()).not.toHaveProperty("research");
+    for (const params of promptParams()) {
+      expect(params).not.toHaveProperty("stall");
+      expect(params).not.toHaveProperty("observerPass");
+    }
+  });
+
+  it("asks for a change of approach and an observer pass after three reasoning_only iterations without stopping", async () => {
+    const agent = evidenceAgent([{ origin: "reasoning_only" }]);
+    const orchestrator = run(agent, 5);
+
+    await orchestrator.start();
+
+    expect(agent.run).toHaveBeenCalledTimes(5);
+    const params = promptParams();
+    expect(params.slice(0, 3).map((p) => p.stall)).toEqual([
+      undefined,
+      undefined,
+      undefined,
+    ]);
+    expect(params[3]!.stall).toEqual([{ signal: "reasoning", iterations: 3 }]);
+    expect(params[3]!.observerPass).toBe(
+      "the stall signal fired after iteration 3",
+    );
+    expect(params[4]).not.toHaveProperty("stall");
+    expect(params[4]).not.toHaveProperty("observerPass");
+    expect(mockAppendDebugLog).toHaveBeenCalledWith(
+      "research:stall",
+      expect.objectContaining({
+        iteration: 3,
+        signals: ["reasoning"],
+        reasoningStreak: 3,
+      }),
+    );
+    expect(
+      mockAppendDebugLog.mock.calls.filter(
+        ([event]) => event === "research:stall",
+      ),
+    ).toHaveLength(1);
+    expect(orchestrator.getState().lastMessage).toBe(
+      "max iterations reached (5)",
+    );
+  });
+
+  it("fires the goals signal after three iterations with no goal change", async () => {
+    const orchestrator = run(
+      evidenceAgent([{ origin: "executed", goals: [] }]),
+      4,
+    );
+
+    await orchestrator.start();
+
+    expect(promptParams()[3]).toHaveProperty("finalIteration");
+    expect(promptParams()[3]).not.toHaveProperty("stall");
+    expect(mockAppendDebugLog).toHaveBeenCalledWith(
+      "research:stall",
+      expect.objectContaining({ iteration: 3, signals: ["goals"] }),
+    );
+  });
+
+  it("names the goals signal in the next prompt", async () => {
+    const orchestrator = run(
+      evidenceAgent([{ origin: "executed", goals: [] }]),
+      5,
+    );
+
+    await orchestrator.start();
+
+    expect(promptParams()[3]!.stall).toEqual([
+      { signal: "goals", iterations: 3 },
+    ]);
+  });
+
+  it("schedules an observer pass every observerEvery iterations", async () => {
+    const orchestrator = run(evidenceAgent([{ origin: "executed" }]), 5, {
+      observerEvery: 2,
+    });
+
+    await orchestrator.start();
+
+    expect(promptParams().map((p) => p.observerPass)).toEqual([
+      undefined,
+      "iteration 2 is a multiple of observerEvery (2)",
+      undefined,
+      "iteration 4 is a multiple of observerEvery (2)",
+      undefined,
+    ]);
+  });
+
+  it("defaults observerEvery to 5 and skips the observer on the final iteration", async () => {
+    const orchestrator = run(evidenceAgent([{ origin: "executed" }]), 6);
+
+    await orchestrator.start();
+
+    const params = promptParams();
+    expect(params[4]!.observerPass).toBe(
+      "iteration 5 is a multiple of observerEvery (5)",
+    );
+    expect(params.filter((p) => p.observerPass !== undefined)).toHaveLength(1);
+  });
+
+  it("disables the scheduled observer pass when observerEvery is 0", async () => {
+    const orchestrator = run(evidenceAgent([{ origin: "executed" }]), 4, {
+      observerEvery: 0,
+    });
+
+    await orchestrator.start();
+
+    expect(
+      promptParams().filter((p) => p.observerPass !== undefined),
+    ).toHaveLength(0);
+  });
+
+  it("rebuilds research stats and the stall signal from gnhf.log on resume", async () => {
+    writeFileSync(
+      statsInfo.logPath,
+      [1, 2, 3]
+        .map((iteration) =>
+          JSON.stringify({
+            event: "iteration:end",
+            iteration,
+            success: true,
+            evidenceOrigin: "reasoning_only",
+            goalsChanged: ["G1"],
+            contractsRun: [],
+            boundary: "",
+          }),
+        )
+        .join("\n") + "\n",
+      "utf-8",
+    );
+    writeFileSync(
+      join(statsInfo.runDir, "ledger", "validated.jsonl"),
+      `${JSON.stringify({ id: "c1", iteration: 1, evidence_origin: "none", claim: "next", type: "contract" })}\n`,
+      "utf-8",
+    );
+    const orchestrator = new Orchestrator(
+      config,
+      evidenceAgent([{ origin: "executed" }]),
+      statsInfo,
+      "study it",
+      dir,
+      3,
+      { maxIterations: 5 },
+    );
+
+    expect(orchestrator.getState().research).toMatchObject({
+      reasoningOnly: 3,
+      reasoningStreak: 3,
+      openContracts: 1,
+      missingBoundary: 0,
+    });
+
+    await orchestrator.start();
+
+    expect(promptParams()[0]).toMatchObject({
+      n: 4,
+      stall: [{ signal: "reasoning", iterations: 3 }],
+      observerPass: "the stall signal fired after iteration 3",
+    });
+    expect(orchestrator.getState().research).toMatchObject({
+      executed: 2,
+      reasoningOnly: 3,
+      reasoningStreak: 0,
+    });
   });
 });

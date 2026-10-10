@@ -60,14 +60,13 @@ Known shape:
 
 ```bash
 gnhf \
-  --agent <agent> \
   --max-iterations <n> \
   --stop-when "<observable completion condition>" \
   --prevent-sleep on \
   "<worker prompt>"
 ```
 
-Use `--model <model>` to select a model for a run. For config defaults and agent-specific restrictions, follow the README [Configuration](../../README.md#configuration).
+Use `--model <model>` and `--effort <level>` to select a Claude model and reasoning effort for a run; the defaults are `claude-opus-5-5` and `medium`. For config defaults and restrictions, follow the README [Configuration](../../README.md#configuration).
 
 Before launch:
 
@@ -149,7 +148,7 @@ Do not ask what to review first. Reconstruct state:
 git status --short
 git branch --show-current
 git log --oneline --decorate --max-count=20
-pgrep -fl 'gnhf|claude|codex|copilot|cursor-agent|opencode|rovodev' || true
+pgrep -fl 'gnhf|claude' || true
 ```
 
 Inspect likely GNHF branches, notes, logs, terminal sessions, and changed files. If a GNHF process is still running, report that first.
@@ -158,12 +157,7 @@ Report mode, agent, branch, status, changes, verification, stop-condition result
 
 ## Agent
 
-The supported `--agent` roster comes from `gnhf --help`; the [Agents table](../../README.md#agents) in the GNHF README owns per-agent requirements. Do not hard-code the roster.
-
-- Default to the agent the user explicitly requested, or the one already configured and authenticated locally.
-- `codex`: repo-aware code work or review-heavy tasks.
-- `claude`: reasoning-heavy implementation or prose-heavy planning when configured.
-- `acp:<target>`: when the user wants to drive a custom ACP-compatible agent through GNHF.
+GNHF runs Claude Code only. The [Agents table](../../README.md#agents) in the GNHF README owns its requirements. Confirm `claude` is installed and signed in before launch.
 
 ## Safety
 

@@ -7,7 +7,7 @@ import {
   existsSync,
   rmSync,
 } from "node:fs";
-import { join, dirname, isAbsolute } from "node:path";
+import { join, dirname, isAbsolute, resolve } from "node:path";
 import { execFileSync } from "node:child_process";
 import {
   buildAgentOutputSchema,
@@ -19,6 +19,13 @@ import {
   type CommitMessageConfig,
 } from "./commit-message.js";
 import { findLegacyRunBaseCommit, getHeadCommit } from "./git.js";
+import { defaultLedgerPath } from "./ledger.js";
+import {
+  formatResearchEvidence,
+  isWorkflow,
+  type ResearchEvidence,
+  type Workflow,
+} from "./workflow.js";
 
 export interface RunInfo {
   runId: string;
@@ -33,6 +40,9 @@ export interface RunInfo {
   stopWhen: string | undefined;
   commitMessagePath: string;
   commitMessage: CommitMessageConfig | undefined;
+  workflowPath: string;
+  workflow: Workflow;
+  ledgerPath?: string;
 }
 
 export interface RunMetadata {
@@ -48,6 +58,8 @@ const LOG_FILENAME = "gnhf.log";
 const END_STATE_FILENAME = "end-state.json";
 const STOP_WHEN_FILENAME = "stop-when";
 const COMMIT_MESSAGE_FILENAME = "commit-message";
+const WORKFLOW_FILENAME = "workflow";
+const LEDGER_PATH_FILENAME = "ledger-path";
 
 function writeSchemaFile(
   schemaPath: string,
@@ -59,6 +71,7 @@ function writeSchemaFile(
       buildAgentOutputSchema({
         includeStopField: schemaOptions.includeStopField,
         commitFields: schemaOptions.commitFields,
+        research: schemaOptions.workflow === "research",
       }),
       null,
       2,
@@ -73,6 +86,8 @@ export interface RunSchemaOptions {
   commitMessage?: CommitMessageConfig;
   stopWhen?: string;
   clearStopWhen?: boolean;
+  workflow?: Workflow;
+  ledger?: string;
 }
 
 export interface RunEndState {
@@ -96,6 +111,47 @@ function readStopWhen(stopWhenPath: string): string | undefined {
   if (!existsSync(stopWhenPath)) return undefined;
   const stopWhen = readFileSync(stopWhenPath, "utf-8").trim();
   return stopWhen.length > 0 ? stopWhen : undefined;
+}
+
+function readWorkflow(workflowPath: string): Workflow {
+  if (!existsSync(workflowPath)) return "default";
+  const value = readFileSync(workflowPath, "utf-8").trim();
+  if (!isWorkflow(value)) {
+    throw new Error(
+      `Unknown workflow "${value}" in ${workflowPath}; pass --workflow default or --workflow research to replace it`,
+    );
+  }
+  return value;
+}
+
+function writeWorkflow(workflowPath: string, workflow: Workflow): void {
+  writeFileSync(workflowPath, `${workflow}\n`, "utf-8");
+}
+
+function resolveRunLedger(
+  runDir: string,
+  cwd: string,
+  workflow: Workflow,
+  ledgerOption: string | undefined,
+): string | undefined {
+  const storedPath = join(runDir, LEDGER_PATH_FILENAME);
+  let configured = ledgerOption;
+  if (configured !== undefined) {
+    writeFileSync(storedPath, `${configured}\n`, "utf-8");
+  } else if (existsSync(storedPath)) {
+    const stored = readFileSync(storedPath, "utf-8").trim();
+    configured = stored.length > 0 ? stored : undefined;
+  }
+  if (workflow !== "research") return undefined;
+  const ledgerPath =
+    configured === undefined
+      ? defaultLedgerPath(runDir)
+      : resolve(cwd, configured);
+  mkdirSync(dirname(ledgerPath), { recursive: true });
+  if (!existsSync(ledgerPath)) {
+    writeFileSync(ledgerPath, "", "utf-8");
+  }
+  return ledgerPath;
 }
 
 function commitMessageMetadataValue(
@@ -242,6 +298,15 @@ export function setupRun(
   const commitMessagePath = join(runDir, COMMIT_MESSAGE_FILENAME);
   const commitMessage = schemaOptions.commitMessage;
   writeCommitMessageMetadata(commitMessagePath, commitMessage);
+  const workflowPath = join(runDir, WORKFLOW_FILENAME);
+  const workflow = schemaOptions.workflow ?? "default";
+  writeWorkflow(workflowPath, workflow);
+  const ledgerPath = resolveRunLedger(
+    runDir,
+    cwd,
+    workflow,
+    schemaOptions.ledger,
+  );
 
   return {
     runId,
@@ -256,6 +321,9 @@ export function setupRun(
     stopWhen,
     commitMessagePath,
     commitMessage,
+    workflowPath,
+    workflow,
+    ...(ledgerPath === undefined ? {} : { ledgerPath }),
   };
 }
 
@@ -288,8 +356,23 @@ export function resumeRun(
   }
   const commitMessagePath = join(runDir, COMMIT_MESSAGE_FILENAME);
   const commitMessage = resolveRunCommitMessage(commitMessagePath, schemaPath);
+  const workflowPath = join(runDir, WORKFLOW_FILENAME);
+  let workflow: Workflow;
+  if (schemaOptions.workflow === undefined) {
+    workflow = readWorkflow(workflowPath);
+  } else {
+    workflow = schemaOptions.workflow;
+    writeWorkflow(workflowPath, workflow);
+  }
+  const ledgerPath = resolveRunLedger(
+    runDir,
+    cwd,
+    workflow,
+    schemaOptions.ledger,
+  );
   writeSchemaFile(schemaPath, {
     ...schemaOptions,
+    workflow,
     commitMessage,
     commitFields: getCommitMessageSchemaFields(commitMessage),
     includeStopField: schemaOptions.includeStopField || stopWhen !== undefined,
@@ -308,6 +391,9 @@ export function resumeRun(
     stopWhen,
     commitMessagePath,
     commitMessage,
+    workflowPath,
+    workflow,
+    ...(ledgerPath === undefined ? {} : { ledgerPath }),
   };
 }
 
@@ -355,13 +441,58 @@ export function getLastIterationNumber(runInfo: RunInfo): number {
   return max;
 }
 
+export interface FinishedIterationCounts {
+  completed: number;
+  successCount: number;
+  failCount: number;
+}
+
 // Attempt logs are created when an iteration starts. Only iteration:end
 // records an iteration that actually finished, including a failed one.
-export function getCompletedIterationCount(runInfo: RunInfo): number {
-  if (!existsSync(runInfo.logPath)) return 0;
+export function getFinishedIterationCounts(
+  runInfo: RunInfo,
+): FinishedIterationCounts {
+  const outcomes = new Map<number, boolean>();
+  if (existsSync(runInfo.logPath)) {
+    for (const line of readFileSync(runInfo.logPath, "utf-8").split("\n")) {
+      if (line.length === 0) continue;
+      let event: { event?: unknown; iteration?: unknown; success?: unknown };
+      try {
+        event = JSON.parse(line) as typeof event;
+      } catch {
+        continue;
+      }
+      if (event.event !== "iteration:end") continue;
+      if (
+        typeof event.iteration !== "number" ||
+        !Number.isInteger(event.iteration) ||
+        event.iteration < 0
+      ) {
+        continue;
+      }
+      outcomes.set(event.iteration, event.success === true);
+    }
+  }
+  const successCount = [...outcomes.values()].filter(Boolean).length;
+  return {
+    completed: outcomes.size,
+    successCount,
+    failCount: outcomes.size - successCount,
+  };
+}
 
-  const finished = new Set<number>();
-  for (const line of readFileSync(runInfo.logPath, "utf-8").split("\n")) {
+const ITERATION_CLOSING_EVENTS = new Set([
+  "iteration:end",
+  "iteration:aborted",
+  "iteration:stopped",
+]);
+
+export function getInterruptedIteration(runDir: string): number | null {
+  const logPath = join(runDir, LOG_FILENAME);
+  if (!existsSync(logPath)) return null;
+
+  let open: number | null = null;
+  for (const line of readFileSync(logPath, "utf-8").split("\n")) {
     if (line.length === 0) continue;
     let event: { event?: unknown; iteration?: unknown };
     try {
@@ -369,17 +500,23 @@ export function getCompletedIterationCount(runInfo: RunInfo): number {
     } catch {
       continue;
     }
-    if (event.event !== "iteration:end") continue;
-    if (
-      typeof event.iteration !== "number" ||
-      !Number.isInteger(event.iteration) ||
-      event.iteration < 0
+    if (event.event === "run:complete") {
+      open = null;
+    } else if (
+      typeof event.iteration === "number" &&
+      Number.isInteger(event.iteration)
     ) {
-      continue;
+      if (event.event === "iteration:start") {
+        open = event.iteration;
+      } else if (
+        ITERATION_CLOSING_EVENTS.has(String(event.event)) &&
+        event.iteration === open
+      ) {
+        open = null;
+      }
     }
-    finished.add(event.iteration);
   }
-  return finished.size;
+  return open;
 }
 
 export function toStringArray(value: unknown): string[] {
@@ -411,10 +548,14 @@ export function appendNotes(
   summary: string,
   changes: string[],
   learnings: string[],
+  evidence?: ResearchEvidence,
 ): void {
   const entry = [
     `\n### Iteration ${iteration}\n`,
     `**Summary:** ${summary}\n`,
+    ...(evidence === undefined
+      ? []
+      : [`${formatResearchEvidence(evidence)}\n`]),
     formatListSection("Changes", changes),
     formatListSection("Learnings", learnings),
   ].join("\n");

@@ -48,7 +48,7 @@ You wake up to a branch full of clean work and a log of everything that happened
 - **Long running** - each iteration is committed on success and rolled back on failure, with sensible retries; [How It Works](#how-it-works) has the full failure-handling rules
 - **Live terminal title** - interactive runs keep your terminal title updated with live status, token totals, and commit count, then clear or restore it on exit depending on terminal support; token totals prefixed with `~` are estimates
 - **Exit summary** - every run ends with a permanent summary covering elapsed time, branch, iterations, tokens, branch diff stats, local notes/log paths, and review commands
-- **Agent-agnostic** - works with the popular coding agent CLIs plus any ACP target out of the box; see [Agents](#agents) for the roster
+- **Built on Claude Code** - drives Anthropic's `claude` CLI in non-interactive mode, defaulting to Opus 5.5 (`claude-opus-5-5`) at medium effort; see [Agents](#agents) for requirements
 
 ## Quick Start
 
@@ -152,17 +152,18 @@ After installing from npm, the skill is available under the installed package di
 ```
 
 - **Incremental commits** - each successful iteration is a separate unsigned git commit, so you can cherry-pick or revert individual changes without GPG or SSH signing prompts blocking the run; if `git commit` fails, gnhf preserves the uncommitted work and asks the next agent iteration to repair it
-- **Failure handling** - failed iterations are rolled back with `git reset --hard` except commit failures, which preserve uncommitted work for repair; agent-reported failures proceed to the next iteration immediately, retryable hard agent errors use exponential backoff, and permanent agent errors such as Claude low credit balance abort immediately and print the run log path. Complete no-op iterations are reported as failures and count toward the consecutive-failure abort limit. If the run exits with a pending commit failure, the exit summary warns that uncommitted changes were left for repair.
-- **OpenCode empty responses** - when a turn completes (`session.idle`) without structured output or a final answer, gnhf asks for a final summary once more in the same session, preserving the work within the same iteration and combining token usage from both turns. A second empty response fails the iteration. If either stream ends before `session.idle`, the iteration fails without another continuation, even if answer text arrived. These failures follow the rollback and backoff rules above.
-- **Usage-limit waits** - gnhf waits out an exhausted usage window (e.g. the subscription 5-hour window) instead of running through it, in both forms it takes. When Claude rejects requests, the iteration is rolled back but not counted as a failure; gnhf reads the reset time from the agent's rate-limit event, waits until shortly after the window resets, then retries the same iteration automatically, so overnight runs resume on their own. Pass `--fallback-model <model>` with `--agent claude` to retry the first rejected iteration on that model instead; without the flag, gnhf never changes models. If no reset time is reported for a rejection, it retries on a bounded escalating interval instead. When usage credits are enabled the provider serves the request and bills the overage rather than rejecting it. A billed iteration that succeeded keeps its committed work and is counted normally; one that failed is rolled back and counted as a failure like any other. Either way gnhf then waits for the reset before starting the next iteration, so the run stops spending credits without throwing away finished work. If the reported reset time has already passed, the included window is back and the run simply continues - if the provider is still billing, the next iteration reports it again with a fresh reset time. If no reset time comes with it at all, or one so far out that gnhf cannot sleep through it in a single wait, gnhf aborts the run rather than keep buying iterations by probing. Use `--max-rate-limit-wait` to set a total wait leash for the run; if the next wait would exceed it, gnhf aborts cleanly. Ctrl+C during the wait works as usual.
+- **Failure handling** - failed iterations are rolled back with `git reset --hard` except commit failures, which preserve uncommitted work for repair; agent-reported failures proceed to the next iteration immediately, retryable hard agent errors use exponential backoff, and permanent agent errors such as Claude low credit balance abort immediately and print the run log path. Complete no-op iterations are reported as failures and count toward the consecutive-failure abort limit and the no-progress stop. If the run exits with a pending commit failure, the exit summary warns that uncommitted changes were left for repair.
+- **Usage-limit waits** - gnhf waits out an exhausted usage window (e.g. the subscription 5-hour window) instead of running through it, in both forms it takes. When Claude rejects requests, the iteration is rolled back but not counted as a failure; gnhf reads the reset time from the agent's rate-limit event, waits until shortly after the window resets, then retries the same iteration automatically, so overnight runs resume on their own. Pass `--fallback-model <model>` to retry the first rejected iteration on that model instead; without the flag, gnhf never changes models. If no reset time is reported for a rejection, it retries on a bounded escalating interval instead. When usage credits are enabled the provider serves the request and bills the overage rather than rejecting it. A billed iteration that succeeded keeps its committed work and is counted normally; one that failed is rolled back and counted as a failure like any other. Either way gnhf then waits for the reset before starting the next iteration, so the run stops spending credits without throwing away finished work. If the reported reset time has already passed, the included window is back and the run simply continues - if the provider is still billing, the next iteration reports it again with a fresh reset time. If no reset time comes with it at all, or one so far out that gnhf cannot sleep through it in a single wait, gnhf aborts the run rather than keep buying iterations by probing. Use `--max-rate-limit-wait` to set a total wait leash for the run; if the next wait would exceed it, gnhf aborts cleanly. Ctrl+C during the wait works as usual.
 - **Runtime caps** - `--max-iterations` stops before the next iteration begins, `--max-tokens` can abort mid-iteration once reported usage reaches the cap across input, output, cache-read, and cache-write tokens, and `--stop-when` ends the loop after an iteration whose agent output reports the natural-language condition is met unless a commit failure needs repair first; resumed runs reuse the saved stop condition unless you pass a new value, or `--stop-when ""` to clear it; pending commit-failure repair work is preserved and other uncommitted work is rolled back, and in the interactive TUI the final state remains visible until you press Ctrl+C to exit
+- **Final iteration** - the prompt tells the agent when an iteration is the run's last, so it can post its summary or handoff before gnhf stops. With `--max-iterations n`, iteration `n` is that final iteration and the cap is not exceeded. With `--until <time>`, every prompt states the deadline, and once it has passed gnhf runs one more wrap-up iteration that is told not to start new work, then stops whether that iteration succeeds or fails. The stop is reported as `deadline reached` unless another stop reason (Ctrl+C, `--stop-when`, a failed `--push`) applies first. The deadline is checked between iterations, so an iteration that is running when it passes finishes first. A usage-limit wait that would end after the deadline stops the run instead of waiting, and error backoff never sleeps past it. `HH:MM` means its next occurrence, so a time earlier than now means tomorrow. Like the other caps, `--until` is not saved for resume.
+- **No-progress stop** - an iteration makes no progress when it reports failure, or succeeds but leaves nothing to commit. Agent errors do not change the count, and a commit failure restarts it. After `maxConsecutiveFailures` (default 3) such iterations in a row, gnhf runs one wrap-up iteration that is told not to start new work and to post its summary, then stops with `no progress in <n> consecutive iterations`, even if the wrap-up iteration fails. A run of reported failures therefore gets this wrap-up iteration instead of the plain `<n> consecutive failures` abort. Work that changes only ignored files or things outside the repository (a pull request comment, a Linear update) also counts as no progress. The count restarts when gnhf restarts or resumes.
 - **Iteration progress** - with `--max-iterations`, the interactive stats line shows `completed/max` between the elapsed timer and token totals. The count includes finished iterations restored on resume and advances only after the active iteration finishes, whether it succeeds or fails. Runs without an iteration cap omit this segment. To fit crowded stats rows, separator spaces are removed and, if needed, token labels become `Σ` (total), `↓` (input), and `↑` (output).
 - **Iteration finalization** - agents are expected to finish validation, stop any background processes they started, and only then emit the final JSON result for the iteration
 - **Graceful interrupts** - in the interactive TUI, the first Ctrl+C requests a graceful stop and lets the current iteration finish (or ends backoff early), the second Ctrl+C force-stops immediately, and `SIGTERM` also force-stops immediately
 - **Exit summary** - after shutdown cleanup, gnhf prints a permanent stdout summary with the final branch, elapsed time, iteration and token totals, branch diff stats, notes/debug-log paths, and review commands
 - **Shared memory** - the agent reads `notes.md` (built up from prior iterations) to communicate across iterations
-- **Local run metadata** - gnhf stores prompt, notes, stop conditions, commit-message convention metadata, and a final `end-state.json` sidecar with the exit status, stop condition, agent error, and counters under `.gnhf/runs/`, and ignores it locally, so your branch only contains intentional work
-- **Resume support** - run `gnhf` while on an existing `gnhf/` branch to pick up where a previous run left off; if you provide a different prompt, gnhf asks whether to update the saved prompt and continue with the existing history, start a new branch, or quit. New runs whose generated branch already exists use a numeric suffix such as `gnhf/<slug>-1`.
+- **Local run metadata** - gnhf stores prompt, notes, stop conditions, commit-message convention metadata, the workflow, the default research ledger, the ledger path, and a final `end-state.json` sidecar with the exit status, stop condition, agent error, and counters under `.gnhf/runs/`, and ignores it locally, so your branch only contains intentional work
+- **Resume support** - run `gnhf` while on an existing `gnhf/` branch to pick up where a previous run left off; if you provide a different prompt, gnhf asks whether to update the saved prompt and continue with the existing history, start a new branch, or quit. New runs whose generated branch already exists use a numeric suffix such as `gnhf/<slug>-1`. If gnhf was killed mid-iteration (crash, reboot, `SIGKILL`), resuming in any mode first commits every uncommitted change in the working tree as `gnhf <n>: wip from interrupted iteration, recovered on resume`, without running pre-commit hooks, and notes it in the run's `notes.md`. That includes edits you made after the crash. Iteration numbering then continues after it.
 
 ### Live Branch Mode
 
@@ -173,7 +174,8 @@ Together, `--current-branch --push` is useful for loose projects where you want 
 - Re-running the same prompt with `--current-branch` resumes the existing `.gnhf/runs/<runId>/` history on a clean working tree and continues iteration numbering.
 - Push failures abort the run after preserving the successful local commit.
 - gnhf never force-pushes or auto-pulls for this mode.
-- `--push` also works with the default `gnhf/` branch mode and sets `origin` as the upstream when needed.
+- `--push` also works with the default `gnhf/` branch mode.
+- gnhf creates its branches without an upstream. Each push sends the current branch to the same-named branch on its push remote (`origin` unless `branch.<name>.pushRemote` or `remote.pushDefault` says otherwise). If the branch has no upstream, or its upstream on that remote is a different branch such as `origin/main`, gnhf sets the pushed branch as the new upstream. This stops a run branch created from `origin/main` from failing its first push or pushing to `main`.
 - Do not combine `--current-branch` with `--worktree`; gnhf exits with an error because those modes choose different working directories.
 
 ### Worktree Mode
@@ -193,6 +195,54 @@ Pass `--worktree` to run each agent in an isolated [git worktree](https://git-sc
 - Known limitation: on Linux, when sleep prevention re-execs gnhf under `systemd-inhibit`, a worktree with no commits is left in place instead of being removed; remove it manually with `git worktree remove`. Tracked as `gnhf-reexec-worktree-leak-l1`.
 - `--worktree` must be run from a non-gnhf branch (typically `main`).
 
+### Research Mode
+
+Pass `--workflow research` for open-ended research objectives. Each iteration prompt gains a `## Research Workflow` section that asks the agent to re-anchor on prior notes and next-study contracts, run one bounded study, label each claim with its evidence origin and boundary, report on every goal, and never delete earlier records. Repetition is treated as a reason to change approach, not to stop.
+
+The agent's output gains four required fields:
+
+- `evidence_origin`: `executed`, `source_read`, `reasoning_only`, or `none`
+- `goals_changed`: ids of goals whose state changed this iteration
+- `contracts_run`: ids of earlier next-study contracts executed this iteration
+- `boundary`: what this iteration's evidence does not show
+
+For each iteration where the agent returned output, whether it succeeded or reported failure, gnhf adds them to the `notes.md` entry as one line, for example `**Evidence:** executed. Goals changed: G1, G2. Contracts run: N5-1. Boundary: ...`, and to the `iteration:end` debug-log event. Iterations that end in an agent error or a commit failure get no evidence line.
+
+The workflow is saved in `.gnhf/runs/<runId>/workflow`. Resuming without `--workflow` keeps the saved workflow. Passing `--workflow` on resume replaces it and rewrites the output schema.
+
+#### Research ledger
+
+Research runs keep a ledger at `.gnhf/runs/<runId>/ledger/records.jsonl`, created empty at setup and ignored by git like the rest of the run directory. `--ledger <path>` (relative to the repo root, or absolute) puts it elsewhere, for example a file committed on the branch. `--ledger` requires `--workflow research`, also on resume. The chosen path is saved in `.gnhf/runs/<runId>/ledger-path`, and resuming without `--ledger` keeps it.
+
+The prompt gives the agent the ledger's absolute path and the record format. Each line is one JSON object with:
+
+- `id`: string, unique across the file
+- `iteration`: integer
+- `evidence_origin`: `executed`, `source_read`, `reasoning_only`, or `none`
+- `claim`: non-empty string
+- optional `boundary` (string), `reframes` (the `id` of an earlier record), `type`, `sources`, `next`, and any other fields. The validator accepts a record without `boundary`, but a claim record without one counts toward `no boundary` in the research stats
+
+A record with `"type": "contract"` registers a next study. The contract stays open until its `id` appears in a successful iteration's `contracts_run` or a later record names it in `reframes`. The `contracts_run` of an iteration that fails, including one whose ledger is rejected, does not close a contract.
+
+The ledger is append only. To revise a record, the agent appends a new record whose `reframes` names it. gnhf keeps the last validated content in `.gnhf/runs/<runId>/ledger/validated.jsonl`. After each iteration that returns output or ends in an agent error, gnhf checks the ledger against that content: every non-empty line must parse as an object with the required fields, ids must be unique, and earlier lines must be unchanged. If the check fails, gnhf saves the agent's ledger to `.gnhf/runs/<runId>/ledger/rejected-iteration-<n>.jsonl` (never overwriting an earlier file), restores the validated content, fails the iteration (its code changes roll back as for any reported failure, and its `should_fully_stop` is ignored), and tells the next iteration the reason, for example `ledger validation failed: line 2 changed (id r1)`.
+
+Iterations that end without a result (aborted, stopped, rate-limited or killed) are not checked when they end. When the run ends and before each iteration, gnhf compares the ledger with the validated copy: valid appends are accepted and lines removed by a git rollback are restored. Any other change is handled before the next iteration, which may be in a resumed run: gnhf saves it to `rejected-before-iteration-<n>.jsonl`, restores the validated content and reports the reason in that iteration's prompt. Valid records from an iteration that reports failure are kept, also in a ledger tracked by git, where they stay uncommitted until the next successful iteration.
+
+#### Research stats, stall signal and observer pass
+
+Research runs show a second stats row in the TUI and a `research` line in the exit summary, for example `exec 3 · reason 1 · goals stale 2 · open contracts 4 · no boundary 1` (the TUI always uses the shorter labels `stale` and `contracts`):
+
+- `exec` and `reason`: iterations that returned output with `evidence_origin` `executed` or `reasoning_only`, whether they succeeded or failed
+- `goals stale`: the most recent iterations in a row that failed or had an empty `goals_changed`
+- `open contracts`: contract records that are still open. Only a successful iteration's `contracts_run` closes a contract
+- `no boundary`: claim records without a non-empty `boundary`. Contract records, records with an `observer` field and records that a later record names in `reframes` are not counted, so appending a reframing record with a boundary lowers the count
+
+gnhf rebuilds the per-iteration counts from the `iteration:end` events in `gnhf.log` and the ledger counts from `validated.jsonl`, so the stats survive a resume.
+
+The stall signal fires after 3 research iterations in a row that failed or had an empty `goals_changed`, or 3 in a row with `evidence_origin` `reasoning_only`, and again after every further 3 of the same streak. The next prompt then gets a `## Change Approach` section naming the signal and asking the agent to run an executed study or an observer pass instead of stopping. The signal never stops the run. gnhf logs it as a `research:stall` debug-log event.
+
+Every `observerEvery`-th iteration (config key, default `5`, `0` disables) and the iteration right after the stall signal fires, the prompt gets an `## Observer Pass` section. It asks the agent to run the six `observer-*` subagents (account-evidence, variation-invariance, means-inspectability, cross-context, purpose-contribution, frontier-exposure) in parallel over the ledger and the run's artifacts, and to append their output as ledger records with `evidence_origin` `none` or `reasoning_only` and an `observer` field. Observer records are leads, not evidence. The subagents must be defined for claude, for example through the `agents` config key. A final or wrap-up iteration gets neither section.
+
 ## CLI Reference
 
 | Command                   | Description                                     |
@@ -206,82 +256,55 @@ If you run `gnhf` on an existing `gnhf/` branch with a different prompt, gnhf as
 
 ### Flags
 
-| Flag                               | Description                                                                                        | Default                |
-| ---------------------------------- | -------------------------------------------------------------------------------------------------- | ---------------------- |
-| `--agent <agent>`                  | Agent to use: a native agent name or `acp:<target-or-command>`; see [Agents](#agents)              | config file (`claude`) |
-| `--model <model>`                  | Model for the agent; overrides `agentModel.<agent>` from the config file                           | config file            |
-| `--max-iterations <n>`             | Abort after `n` total iterations                                                                   | unlimited              |
-| `--max-tokens <n>`                 | Abort after `n` total input+output+cache tokens                                                    | unlimited              |
-| `--max-rate-limit-wait <duration>` | Abort after this much total Claude usage-limit wait (`30m`, `2h`, or `0`)                          | 24h safety cap         |
-| `--stop-when <cond>`               | End when the agent reports this condition, after any commit-failure repair; persists across resume | unlimited              |
-| `--prevent-sleep <mode>`           | Prevent system sleep during the run (`on`/`off` or `true`/`false`)                                 | config file (`on`)     |
-| `--worktree`                       | Run in a separate git worktree (enables multiple agents concurrently)                              | `false`                |
-| `--current-branch`                 | Run on the current branch instead of creating a `gnhf/` branch                                     | `false`                |
-| `--push`                           | Push the current branch after each successful iteration                                            | `false`                |
-| `--meteor-frequency <n>`           | Set TUI meteor frequency from 0 to 5 (`0` disables meteors)                                        | `3`                    |
-| `--version`                        | Show version                                                                                       |                        |
+| Flag                               | Description                                                                                                   | Default                             |
+| ---------------------------------- | ------------------------------------------------------------------------------------------------------------- | ----------------------------------- |
+| `--model <model>`                  | Claude model; overrides `agentModel.claude` from the config file                                              | config file, else `claude-opus-5-5` |
+| `--effort <level>`                 | Claude reasoning effort (`low`, `medium`, `high`, `xhigh`, or `max`); overrides `effort` from the config file | config file (`medium`)              |
+| `--max-iterations <n>`             | Abort after `n` total iterations                                                                              | unlimited                           |
+| `--max-tokens <n>`                 | Abort after `n` total input+output+cache tokens                                                               | unlimited                           |
+| `--max-rate-limit-wait <duration>` | Abort after this much total Claude usage-limit wait (`30m`, `2h`, or `0`)                                     | 24h safety cap                      |
+| `--until <time>`                   | Wrap up and stop at a local time (`17:30` for its next occurrence, or `2026-10-11T06:00`)                     | none                                |
+| `--stop-when <cond>`               | End when the agent reports this condition, after any commit-failure repair; persists across resume            | unlimited                           |
+| `--workflow <name>`                | Iteration workflow (`default` or `research`); persists across resume                                          | `default`                           |
+| `--ledger <path>`                  | Research ledger file, repo-relative or absolute; requires `--workflow research`; persists across resume       | `.gnhf/runs/<runId>/ledger/`        |
+| `--prevent-sleep <mode>`           | Prevent system sleep during the run (`on`/`off` or `true`/`false`)                                            | config file (`on`)                  |
+| `--worktree`                       | Run in a separate git worktree (enables multiple agents concurrently)                                         | `false`                             |
+| `--current-branch`                 | Run on the current branch instead of creating a `gnhf/` branch                                                | `false`                             |
+| `--push`                           | Push the current branch after each successful iteration                                                       | `false`                             |
+| `--meteor-frequency <n>`           | Set TUI meteor frequency from 0 to 5 (`0` disables meteors)                                                   | `3`                                 |
+| `--version`                        | Show version                                                                                                  |                                     |
 
 ## Configuration
 
 Config lives at `~/.gnhf/config.yml`.
 If the file does not exist yet, `gnhf` creates it on first run with its defaults.
-A supplied `--agent` is written as the default agent.
 With the default configuration, it has this exact content:
 
 <!-- This block mirrors src/core/bootstrap-config.golden.yml and is pinned to it by src/core/bootstrap-config.test.ts; update both together. -->
 
 ```yaml
-# Agent to use by default: native agent name or acp:<target-or-command>
-agent: claude
-
-# Custom paths to native agent binaries (optional)
+# Custom path to the claude binary (optional)
 # Paths may be absolute, bare executable names on PATH,
 # ~-prefixed, or relative to this config directory.
-# Note: rovodev overrides must point to an acli-compatible binary.
 # agentPathOverride:
 #   claude: /path/to/custom-claude
-#   codex: /path/to/custom-codex
-#   copilot: /path/to/custom-copilot
-#   pi: /path/to/custom-pi
-#   cursor: /path/to/custom-cursor-agent
 
-# Native agent CLI arg overrides (optional)
-# ACP targets do not support path or arg overrides.
+# Extra claude CLI args (optional)
 # agentArgsOverride:
-#   codex:
-#     - -m
-#     - gpt-5.4
-#     - -c
-#     - model_reasoning_effort="high"
-#     - --full-auto
-#   copilot:
-#     - --model
-#     - gpt-5.4
-#   pi:
-#     - --provider
-#     - openai-codex
-#     - --model
-#     - gpt-5.5
-#     - --thinking
-#     - high
-#   cursor:
-#     - --model
-#     - composer-2.5
+#   claude:
+#     - --add-dir
+#     - ../shared-lib
 
-# Models for supported native agents (optional)
-# Values are forwarded to the CLI except opencode, which receives
-# its model in the request body.
+# Claude model (optional, defaults to claude-opus-5-5)
 # agentModel:
 #   claude: sonnet
-#   codex: gpt-5.4
-#   opencode: fireworks-ai/accounts/fireworks/models/qwen3p6-plus
 
-# Custom ACP target commands (optional)
-# Maps acp:<target> names to spawn commands. Useful for naming a
-# local or beta build of an ACP agent.
-# acpRegistryOverrides:
-#   my-fork: "/usr/local/bin/my-claude-code-fork --acp"
-#   staging: "node /opt/staging/agent.mjs"
+# Subagent definitions passed to claude --agents (optional)
+# A JSON file mapping agent names to definitions.
+# agents: ./agents.json
+
+# Extra system prompt passed to claude --append-system-prompt-file (optional)
+# appendSystemPrompt: ./system-prompt.md
 
 # Commit message convention (optional)
 # Defaults to: gnhf <iteration>: <summary>
@@ -289,24 +312,32 @@ agent: claude
 # commitMessage:
 #   preset: conventional
 
+# Claude reasoning effort: low, medium, high, xhigh, or max
+effort: medium
+
 # Abort after this many consecutive failures
 maxConsecutiveFailures: 3
+
+# Research runs: run the six observer subagents every n iterations (0 disables)
+observerEvery: 5
 
 # Prevent the machine from sleeping during a run
 preventSleep: true
 ```
 
+`observerEvery` must be a whole number of 0 or more. It only affects `--workflow research` runs.
+
 CLI flags override config file values. `--prevent-sleep` accepts `on`/`off` as well as `true`/`false`; the config file always uses a boolean.
-The iteration, token, and rate-limit-wait caps are runtime-only flags and are not persisted in `config.yml`; `--stop-when` is persisted per run for resume, but not in config.
+The iteration, token, and rate-limit-wait caps are runtime-only flags and are not persisted in `config.yml`; `--stop-when`, `--workflow` and `--ledger` are persisted per run for resume, but not in config.
 
-`agentArgsOverride.<name>` lets you pass through extra CLI flags for any native agent in the [Agents](#agents) table.
-ACP targets do not support path or arg overrides in this version.
-Use `acpRegistryOverrides` to map `acp:<target>` names to custom spawn commands for local, forked, or beta ACP agents.
-You can also pass a raw custom ACP server command directly as a quoted `acp:` spec, for example `gnhf --agent 'acp:./bin/dev-acp --profile ci' "fix the tests"`.
+`effort` sets Claude's reasoning effort for every iteration and is passed as `claude --effort <level>`. Valid levels are `low`, `medium`, `high`, `xhigh`, and `max`; the default is `medium`, and `--effort` overrides it for a single run without changing `config.yml`.
 
-- Use it for agent-specific profiles or reasoning settings that lack a dedicated `gnhf` config field. Set a model with `agentModel.<name>` in config or `--model <model>` for a run; `--model` wins. OpenCode requires a `provider/model` pair, and its `--model`/`-m` overrides are rejected because `opencode serve` does not accept them. Rovo Dev model overrides are unsupported; set `agent.modelId` in Rovo Dev settings instead.
-- For `codex`, `claude`, `copilot`, and `cursor`, `gnhf` adds its usual non-interactive permission default only when you do not provide your own permission or execution-mode flag. If you set one explicitly, `gnhf` treats that as user-managed and does not add its default on top.
-- Flags that `gnhf` manages itself for a given agent, such as output-shaping or local-server startup flags, are rejected during config loading so you get a clear error instead of duplicate-argument ambiguity. For `pi` and `cursor`, `--api-key` is also blocked; configure credentials via Pi's own config or the `CURSOR_API_KEY` environment variable, not via `agentArgsOverride`.
+`agentArgsOverride.claude` passes extra flags through to the `claude` CLI.
+
+- Use it for Claude settings that lack a dedicated `gnhf` config field. Set a model with `agentModel.claude` in config or `--model <model>` for a run; `--model` wins. With neither set, gnhf passes `--model claude-opus-5-5`, unless `agentArgsOverride.claude` sets `--model` itself.
+- `gnhf` adds `--dangerously-skip-permissions` only when you do not provide your own permission flag (`--dangerously-skip-permissions`, `--permission-mode`, or `--permission-prompt-tool`). If you set one explicitly, `gnhf` treats that as user-managed and does not add its default on top.
+- Flags that `gnhf` manages itself (`-p`/`--print`, `--verbose`, `--output-format`, `--json-schema`, and `--effort`) are rejected during config loading so you get a clear error instead of duplicate-argument ambiguity. Set effort with the `effort` key or `--effort` instead.
+- Config files from earlier versions that name another agent (`agent: codex`, `agentModel.codex`, `acpRegistryOverrides`, and so on) are rejected with an error that names the key to remove. `agent: claude` is still accepted.
 
 `commitMessage` controls the subject line that gnhf uses for each successful iteration commit.
 
@@ -314,20 +345,16 @@ You can also pass a raw custom ACP server command directly as a quoted `acp:` sp
 - Set `preset: conventional` to ask the agent for `type` and optional `scope`, then commit as `type(scope): summary` for semantic-release style workflows. Valid types are `build`, `ci`, `docs`, `feat`, `fix`, `perf`, `refactor`, `test`, and `chore`; invalid or missing types fall back to `chore`, and empty scopes are omitted.
 - The resolved commit-message convention is saved per run, so resuming keeps the original subject format even if `config.yml` changes later.
 
-### Custom Agent Paths
+### Custom Claude Path
 
-Use `agentPathOverride` to point any native agent at a custom binary - useful for wrappers like Claude Code Switch or custom Codex builds that accept the same flags and arguments as the original:
+Use `agentPathOverride.claude` to point `gnhf` at a custom `claude` binary, such as a wrapper like Claude Code Switch that accepts the same flags and arguments as the original:
 
 ```yaml
 agentPathOverride:
   claude: ~/bin/claude-code-switch
-  codex: /usr/local/bin/my-codex-wrapper
-  copilot: ~/bin/copilot-wrapper
-  pi: ~/bin/pi-wrapper
-  cursor: ~/bin/cursor-agent-wrapper
 ```
 
-Paths may be absolute, bare executable names already on your `PATH`, `~`-prefixed, or relative to the config directory (`~/.gnhf/`). The override replaces only the binary name; all standard arguments are preserved, so the replacement must be CLI-compatible with the original agent. On Windows, `.cmd` and `.bat` wrappers are supported, including bare names resolved from `PATH`. For `rovodev`, the override must point to an `acli`-compatible binary since gnhf invokes it as `<bin> rovodev serve ...`.
+Paths may be absolute, bare executable names already on your `PATH`, `~`-prefixed, or relative to the config directory (`~/.gnhf/`). The override replaces only the binary name; all standard arguments are preserved, so the replacement must be CLI-compatible with `claude`. On Windows, `.cmd` and `.bat` wrappers are supported, including bare names resolved from `PATH`.
 
 ### Sleep Prevention
 
@@ -336,8 +363,7 @@ A run is never aborted because that mechanism is unavailable; instead the exit s
 
 ## Debug Logs
 
-Every run writes a JSONL debug log to `.gnhf/runs/<runId>/gnhf.log` alongside `notes.md`. Lifecycle events for the orchestrator, agent, and HTTP requests are captured with elapsed timings and (for failures) the full `error.cause` chain, which is what you need to tell a bare `TypeError: fetch failed` apart from an undici `UND_ERR_HEADERS_TIMEOUT`. The agent's own streaming output still goes to the per-iteration `iteration-<n>.jsonl` file next to it.
-Raw ACP command specs are redacted as `acp:custom`/`custom` in debug logs and related errors, so local paths or secrets in custom commands are not written to `gnhf.log`.
+Every run writes a JSONL debug log to `.gnhf/runs/<runId>/gnhf.log` alongside `notes.md`. Lifecycle events for the orchestrator and agent are captured with elapsed timings and (for failures) the full `error.cause` chain. The agent's own streaming output still goes to the per-iteration `iteration-<n>.jsonl` file next to it.
 
 Including a snippet of `gnhf.log` is the single most useful thing you can attach when filing an issue.
 
@@ -349,18 +375,11 @@ Set `GNHF_TELEMETRY=0` to turn it off.
 
 ## Agents
 
-`gnhf` supports seven native agents plus ACP targets. ACP support is powered by [`acpx`](https://github.com/openclaw/acpx), which is bundled with `gnhf` and provides the runtime and agent registry for `acp:<target-or-command>` specs.
+`gnhf` runs Claude Code only.
 
-| Agent              | Flag                              | Requirements                                                                                                                                                                                            | Notes                                                                                                                                                                                                                                                                                                                                                                                      |
-| ------------------ | --------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| Claude Code        | `--agent claude`                  | Install Anthropic's `claude` CLI and sign in first.                                                                                                                                                     | `gnhf` invokes `claude` directly in non-interactive mode. After Claude emits a successful structured result, `gnhf` treats that result as final and shuts down any lingering Claude process tree after a short grace period.                                                                                                                                                               |
-| Codex              | `--agent codex`                   | Install OpenAI's `codex` CLI and sign in first.                                                                                                                                                         | `gnhf` invokes `codex exec` directly in non-interactive mode.                                                                                                                                                                                                                                                                                                                              |
-| GitHub Copilot CLI | `--agent copilot`                 | Install GitHub Copilot CLI and sign in first.                                                                                                                                                           | `gnhf` invokes `copilot` directly in non-interactive JSONL mode. Copilot currently exposes assistant output tokens, but not full input/cache token totals; see https://github.com/github/copilot-cli/issues/1152.                                                                                                                                                                          |
-| Pi                 | `--agent pi`                      | Install the `pi` CLI and configure a usable provider/model first.                                                                                                                                       | `gnhf` invokes `pi` directly in JSON mode, appends the final output schema to the prompt, and disables Pi session persistence with `--no-session`.                                                                                                                                                                                                                                         |
-| Cursor CLI         | `--agent cursor`                  | Install Cursor's CLI and sign in first (`cursor-agent login`).                                                                                                                                          | `gnhf` invokes `cursor-agent` (falling back to the `agent` name) directly in non-interactive `--print` stream-json mode, appends the final output schema to the prompt, and defaults to `--force`, `--trust`, and `--approve-mcps` unless you override those flags. After Cursor emits a non-error result, `gnhf` shuts down any lingering Cursor process tree after a short grace period. |
-| Rovo Dev           | `--agent rovodev`                 | Install Atlassian's `acli` and authenticate it with Rovo Dev first.                                                                                                                                     | `gnhf` starts a local `acli rovodev serve --disable-session-token <port>` process automatically in the repo workspace.                                                                                                                                                                                                                                                                     |
-| OpenCode           | `--agent opencode`                | Install `opencode` and configure at least one usable model provider first.                                                                                                                              | `gnhf` starts a local `opencode serve --hostname 127.0.0.1 --port <port> --print-logs` process automatically, creates a session for each iteration, and applies a blanket allow rule so tool calls do not block on prompts.                                                                                                                                                                |
-| ACP target         | `--agent acp:<target-or-command>` | Install and authenticate the target supported by the bundled [`acpx`](https://github.com/openclaw/acpx) registry, such as `acp:gemini` or `acp:grok-build`, or pass a quoted custom ACP server command. | `gnhf` runs the target through ACP with a persistent per-run session under `.gnhf/runs/<runId>/acp-sessions`; token usage and `--max-tokens` use ACP `used` deltas when available, with prompt-length plus tool-call estimates as a fallback, and `agentPathOverride` and `agentArgsOverride` do not apply.                                                                                |
+| Agent       | Requirements                                        | Notes                                                                                                                                                                                                                                                                                                      |
+| ----------- | --------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Claude Code | Install Anthropic's `claude` CLI and sign in first. | `gnhf` invokes `claude` directly in non-interactive mode with `--model claude-opus-5-5 --effort medium` unless you configure otherwise. After Claude emits a successful structured result, `gnhf` treats that result as final and shuts down any lingering Claude process tree after a short grace period. |
 
 ## Development
 

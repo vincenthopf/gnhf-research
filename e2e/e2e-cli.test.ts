@@ -105,7 +105,7 @@ function createHomeWithConfig(
   return { ...process.env, HOME: home, USERPROFILE: home };
 }
 
-function createMockOpencodeEnv(
+function createMockClaudeEnv(
   temp: TempCleanup,
   configYaml: string,
 ): { env: NodeJS.ProcessEnv; mockLogPath: string } {
@@ -113,14 +113,14 @@ function createMockOpencodeEnv(
   mkdirSync(join(home, ".gnhf"), { recursive: true });
   writeFileSync(join(home, ".gnhf", "config.yml"), configYaml, "utf-8");
   const logDir = temp.mkdir("logs");
-  const mockLogPath = join(logDir, "mock-opencode.jsonl");
+  const mockLogPath = join(logDir, "mock-claude.jsonl");
   return {
     env: {
       ...process.env,
       HOME: home,
       USERPROFILE: home,
       PATH: `${fixtureBinDir}${process.platform === "win32" ? ";" : ":"}${process.env.PATH ?? ""}`,
-      GNHF_MOCK_OPENCODE_LOG_PATH: mockLogPath,
+      GNHF_MOCK_CLAUDE_LOG_PATH: mockLogPath,
     },
     mockLogPath,
   };
@@ -150,8 +150,9 @@ describe.concurrent("gnhf e2e cli", () => {
   it("prints a friendly message outside a git repository", async () => {
     await withTemp(async (temp) => {
       const cwd = temp.mkdir("no-git");
+      const env = createHomeWithConfig(temp, "");
 
-      const result = await runCli(cwd, ["ship it", "--agent", "claude"]);
+      const result = await runCli(cwd, ["ship it"], env);
 
       expect(result.code).not.toBe(0);
       expect(result.stderr).toContain(
@@ -196,12 +197,9 @@ describe.concurrent("gnhf e2e cli", () => {
       const cwd = createRepo(temp);
       git(["checkout", "-b", "gnhf/existing-run"], cwd);
 
-      const result = await runCli(cwd, [
-        "new objective",
-        "--agent",
-        "claude",
-        "--worktree",
-      ]);
+      const env = createHomeWithConfig(temp, "");
+
+      const result = await runCli(cwd, ["new objective", "--worktree"], env);
 
       expect(result.code).not.toBe(0);
       expect(result.stderr).toContain(
@@ -210,26 +208,113 @@ describe.concurrent("gnhf e2e cli", () => {
     });
   }, 15_000);
 
-  it("uses config.agent when --agent flag is omitted", async () => {
+  it("accepts a legacy agent: claude config key", async () => {
     await withTemp(async (temp) => {
       const cwd = createRepo(temp);
-      const { env, mockLogPath } = createMockOpencodeEnv(
-        temp,
-        "agent: opencode\n",
-      );
+      const { env, mockLogPath } = createMockClaudeEnv(temp, "agent: claude\n");
 
       const result = await runCli(
         cwd,
-        ["ship it", "--max-iterations", "1"],
+        ["ship it", "--max-iterations", "1", "--prevent-sleep", "off"],
         env,
       );
 
       expect(result.code).toBe(0);
       expect(git(["rev-list", "--count", "HEAD"], cwd)).toBe("2");
       const mockLog = readFileSync(mockLogPath, "utf-8");
-      expect(mockLog).toContain('"event":"server:start"');
+      expect(mockLog).toContain('"event":"spawn"');
     });
   }, 30_000);
+
+  it.each([
+    {
+      label: "defaults to Opus 5.5 at medium effort",
+      configYaml: "maxConsecutiveFailures: 3\n",
+      args: [],
+      expected: ["--model", "claude-opus-5-5", "--effort", "medium"],
+    },
+    {
+      label: "uses agentModel.claude and the effort config key",
+      configYaml: "agentModel:\n  claude: sonnet\neffort: xhigh\n",
+      args: [],
+      expected: ["--model", "sonnet", "--effort", "xhigh"],
+    },
+    {
+      label: "lets --model and --effort override config",
+      configYaml: "agentModel:\n  claude: sonnet\neffort: low\n",
+      args: ["--model", "haiku", "--effort", "max"],
+      expected: ["--model", "haiku", "--effort", "max"],
+    },
+  ])(
+    "$label",
+    async ({ configYaml, args, expected }) => {
+      await withTemp(async (temp) => {
+        const cwd = createRepo(temp);
+        const { env, mockLogPath } = createMockClaudeEnv(temp, configYaml);
+
+        const result = await runCli(
+          cwd,
+          [
+            "ship it",
+            "--max-iterations",
+            "1",
+            "--prevent-sleep",
+            "off",
+            ...args,
+          ],
+          { ...env, GNHF_TELEMETRY: "0" },
+        );
+
+        expect(result.code).toBe(0);
+        const spawn = readFileSync(mockLogPath, "utf-8")
+          .trim()
+          .split("\n")
+          .map((line) => JSON.parse(line) as { event: string; args: string[] })
+          .find((entry) => entry.event === "spawn");
+        expect(spawn?.args.slice(0, 4)).toEqual(expected);
+        expect(spawn?.args.filter((arg) => arg === "--effort")).toHaveLength(1);
+      });
+    },
+    30_000,
+  );
+
+  it("rejects an unknown --effort level", async () => {
+    await withTemp(async (temp) => {
+      const cwd = createRepo(temp);
+
+      const result = await runCli(cwd, ["ship it", "--effort", "extreme"]);
+
+      expect(result.code).not.toBe(0);
+      expect(result.stderr).toContain(
+        "must be one of: low, medium, high, xhigh, or max",
+      );
+    });
+  }, 15_000);
+
+  it("rejects a legacy non-claude agent config key", async () => {
+    await withTemp(async (temp) => {
+      const cwd = createRepo(temp);
+      const env = createHomeWithConfig(temp, "agent: codex\n");
+
+      const result = await runCli(cwd, ["ship it"], env);
+
+      expect(result.code).not.toBe(0);
+      expect(result.stderr).toContain(
+        'Unsupported config value for agent: "codex". gnhf only supports claude; remove the agent key from ~/.gnhf/config.yml.',
+      );
+    });
+  }, 15_000);
+
+  it("rejects the removed --agent flag", async () => {
+    await withTemp(async (temp) => {
+      const cwd = createRepo(temp);
+
+      const result = await runCli(cwd, ["ship it", "--agent", "claude"]);
+
+      expect(result.code).not.toBe(0);
+      expect(result.stderr).toContain("unknown option '--agent'");
+    });
+  }, 15_000);
 
   it.each([
     ["preset: gnhf", "commitMessage:\n  preset: gnhf\n"],
@@ -243,7 +328,7 @@ describe.concurrent("gnhf e2e cli", () => {
         const cwd = createRepo(temp);
         const env = createHomeWithConfig(temp, configYaml);
 
-        const result = await runCli(cwd, ["ship it", "--agent", "claude"], env);
+        const result = await runCli(cwd, ["ship it"], env);
 
         expect(result.code).not.toBe(0);
         expect(result.stderr).toContain(
@@ -259,7 +344,7 @@ describe.concurrent("gnhf e2e cli", () => {
       const cwd = createRepo(temp);
       const env = createHomeWithConfig(temp, "commitMessage:\n");
 
-      const result = await runCli(cwd, ["ship it", "--agent", "claude"], env);
+      const result = await runCli(cwd, ["ship it"], env);
 
       expect(result.code).not.toBe(0);
       expect(result.stderr).toContain(
@@ -281,7 +366,7 @@ describe.concurrent("gnhf e2e cli", () => {
         ].join("\n"),
       );
 
-      const result = await runCli(cwd, ["ship it", "--agent", "claude"], env);
+      const result = await runCli(cwd, ["ship it"], env);
 
       expect(result.code).not.toBe(0);
       expect(result.stderr).toContain(
@@ -317,29 +402,41 @@ describe.concurrent("gnhf e2e cli", () => {
       expected: "Invalid agent name in agentArgsOverride",
     },
     {
-      label: "agentArgsOverride.codex: not an array",
-      yaml: 'agentArgsOverride:\n  codex: "--full-auto"\n',
-      expected: "Invalid config value for agentArgsOverride.codex",
+      label: "agentArgsOverride.claude: not an array",
+      yaml: 'agentArgsOverride:\n  claude: "--add-dir"\n',
+      expected: "Invalid config value for agentArgsOverride.claude",
     },
     {
-      label: "agentArgsOverride.codex: blank value",
-      yaml: 'agentArgsOverride:\n  codex:\n    - "   "\n',
-      expected: "Invalid config value for agentArgsOverride.codex[0]",
+      label: "agentArgsOverride.claude: blank value",
+      yaml: 'agentArgsOverride:\n  claude:\n    - "   "\n',
+      expected: "Invalid config value for agentArgsOverride.claude[0]",
     },
     {
-      label: "agentArgsOverride.codex: gnhf-managed flag",
-      yaml: "agentArgsOverride:\n  codex:\n    - --output-schema=custom.json\n",
+      label: "agentArgsOverride.claude: gnhf-managed flag",
+      yaml: "agentArgsOverride:\n  claude:\n    - --output-format=json\n",
       expected: "managed by gnhf",
     },
     {
-      label: "agentArgsOverride.rovodev: gnhf-managed flag",
-      yaml: "agentArgsOverride:\n  rovodev:\n    - serve\n",
-      expected: "managed by gnhf",
+      label: "effort: unknown level",
+      yaml: "effort: extreme\n",
+      expected:
+        'Invalid config value for effort: "extreme". Use low, medium, high, xhigh, or max.',
     },
     {
-      label: "agentArgsOverride.copilot: gnhf-managed flag",
-      yaml: "agentArgsOverride:\n  copilot:\n    - --output-format=json\n",
-      expected: "managed by gnhf",
+      label: "agentArgsOverride.claude: --effort",
+      yaml: "agentArgsOverride:\n  claude:\n    - --effort\n    - high\n",
+      expected:
+        'Invalid config value for agentArgsOverride.claude[0]: "--effort" is managed by gnhf. Set effort in ~/.gnhf/config.yml or pass --effort instead.',
+    },
+    {
+      label: "agentModel: non-claude agent name",
+      yaml: "agentModel:\n  codex: gpt-5.4\n",
+      expected: 'Invalid agent name in agentModel: "codex"',
+    },
+    {
+      label: "acpRegistryOverrides: removed key",
+      yaml: 'acpRegistryOverrides:\n  my-fork: "node agent.mjs"\n',
+      expected: "Unsupported config key acpRegistryOverrides",
     },
   ])(
     "rejects invalid config: $label",
@@ -348,7 +445,7 @@ describe.concurrent("gnhf e2e cli", () => {
         const cwd = createRepo(temp);
         const env = createHomeWithConfig(temp, yaml);
 
-        const result = await runCli(cwd, ["ship it", "--agent", "claude"], env);
+        const result = await runCli(cwd, ["ship it"], env);
 
         expect(result.code).not.toBe(0);
         expect(result.stderr).toContain(expected);

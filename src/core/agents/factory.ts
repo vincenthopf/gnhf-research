@@ -1,96 +1,48 @@
-import { join } from "node:path";
 import {
   buildAgentOutputSchema,
   type Agent,
   type AgentOutputCommitField,
 } from "./types.js";
-import { getAcpTarget, isAcpSpec, type AgentSpec } from "../config.js";
-import type { RunInfo } from "../run.js";
-import { AcpAgent } from "./acp.js";
 import { ClaudeAgent } from "./claude.js";
-import { CopilotAgent } from "./copilot.js";
-import { CodexAgent } from "./codex.js";
-import { CursorAgent } from "./cursor.js";
-import { OpenCodeAgent } from "./opencode.js";
-import { PiAgent } from "./pi.js";
-import { RovoDevAgent } from "./rovodev.js";
+import type { EffortLevel } from "../effort.js";
+import type { Workflow } from "../workflow.js";
+
+export const DEFAULT_CLAUDE_MODEL = "claude-opus-5-5";
 
 export interface CreateAgentOptions {
   includeStopField: boolean;
   commitFields?: AgentOutputCommitField[];
-  acpRegistryOverrides?: Record<string, string>;
   model?: string;
+  effort: EffortLevel;
+  agentsPath?: string;
+  appendSystemPromptPath?: string;
+  workflow?: Workflow;
+}
+
+function setsModel(args: string[] | undefined): boolean {
+  return (args ?? []).some(
+    (arg) => arg === "--model" || arg.startsWith("--model="),
+  );
 }
 
 export function createAgent(
-  spec: AgentSpec,
-  runInfo: RunInfo,
   pathOverride: string | undefined,
   agentArgsOverride: string[] | undefined,
   options: CreateAgentOptions,
 ): Agent {
-  const schema = buildAgentOutputSchema({
-    includeStopField: options.includeStopField,
-    commitFields: options.commitFields,
+  return new ClaudeAgent({
+    bin: pathOverride,
+    extraArgs: agentArgsOverride,
+    model:
+      options.model ??
+      (setsModel(agentArgsOverride) ? undefined : DEFAULT_CLAUDE_MODEL),
+    effort: options.effort,
+    agentsPath: options.agentsPath,
+    appendSystemPromptPath: options.appendSystemPromptPath,
+    schema: buildAgentOutputSchema({
+      includeStopField: options.includeStopField,
+      commitFields: options.commitFields,
+      research: options.workflow === "research",
+    }),
   });
-
-  if (isAcpSpec(spec)) {
-    return new AcpAgent({
-      target: getAcpTarget(spec),
-      schema,
-      runId: runInfo.runId,
-      sessionStateDir: join(runInfo.runDir, "acp-sessions"),
-      registryOverrides: options.acpRegistryOverrides,
-    });
-  }
-
-  const name = spec;
-  switch (name) {
-    case "claude":
-      return new ClaudeAgent({
-        bin: pathOverride,
-        extraArgs: agentArgsOverride,
-        model: options.model,
-        schema,
-      });
-    case "codex":
-      return new CodexAgent(runInfo.schemaPath, {
-        bin: pathOverride,
-        extraArgs: agentArgsOverride,
-        model: options.model,
-      });
-    case "copilot":
-      return new CopilotAgent({
-        bin: pathOverride,
-        extraArgs: agentArgsOverride,
-        model: options.model,
-        schema,
-      });
-    case "opencode":
-      return new OpenCodeAgent({
-        bin: pathOverride,
-        extraArgs: agentArgsOverride,
-        model: options.model,
-        schema,
-      });
-    case "pi":
-      return new PiAgent({
-        bin: pathOverride,
-        extraArgs: agentArgsOverride,
-        model: options.model,
-        schema,
-      });
-    case "cursor":
-      return new CursorAgent({
-        bin: pathOverride,
-        extraArgs: agentArgsOverride,
-        model: options.model,
-        schema,
-      });
-    case "rovodev":
-      return new RovoDevAgent(runInfo.schemaPath, {
-        bin: pathOverride,
-        extraArgs: agentArgsOverride,
-      });
-  }
 }

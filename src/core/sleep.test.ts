@@ -155,7 +155,7 @@ describe("startSleepPrevention", () => {
     });
 
     const result = await startSleepPrevention(
-      ["ship it", "--agent", "opencode"],
+      ["ship it", "--model", "sonnet"],
       {
         env: {},
         platform: "linux",
@@ -172,8 +172,8 @@ describe("startSleepPrevention", () => {
         "/node",
         "/dist/cli.mjs",
         "ship it",
-        "--agent",
-        "opencode",
+        "--model",
+        "sonnet",
       ]),
       expect.objectContaining({
         detached: true,
@@ -229,7 +229,7 @@ describe("startSleepPrevention", () => {
       return child as never;
     });
 
-    const result = await startSleepPrevention(["--agent", "opencode"], {
+    const result = await startSleepPrevention(["--model", "sonnet"], {
       env: {},
       platform: "linux",
       processArgv1: "/dist/cli.mjs",

@@ -239,7 +239,7 @@ describe("TelemetryClient", () => {
       fetch,
     });
 
-    client.pageview("/run", { agent: "codex" });
+    client.pageview("/run", { agent: "claude" });
     await client.close(500);
 
     const body = requests[0]!.body as {

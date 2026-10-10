@@ -36,7 +36,8 @@ import {
   resumeRun,
   peekRunMetadata,
   toStringArray,
-  getCompletedIterationCount,
+  getFinishedIterationCounts,
+  getInterruptedIteration,
 } from "./run.js";
 import { CONVENTIONAL_COMMIT_MESSAGE } from "./commit-message.js";
 
@@ -54,6 +55,7 @@ const mockGetHeadCommit = vi.mocked(getHeadCommit);
 describe("setupRun", () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    mockExistsSync.mockImplementation(() => false);
     mockExecFileSync.mockReturnValue(".git/info/exclude\n");
   });
 
@@ -285,7 +287,148 @@ describe("setupRun", () => {
       stopWhen: undefined,
       commitMessagePath: join(runDir, "commit-message"),
       commitMessage: undefined,
+      workflowPath: join(runDir, "workflow"),
+      workflow: "default",
     });
+  });
+
+  it("writes the default workflow file when workflow is omitted", () => {
+    setupRun("run-abc", "test", "abc123", P, { includeStopField: false });
+
+    expect(mockWriteFileSync).toHaveBeenCalledWith(
+      join(P, ".gnhf", "runs", "run-abc", "workflow"),
+      "default\n",
+      "utf-8",
+    );
+  });
+
+  it("writes the research workflow file and research schema fields", () => {
+    const info = setupRun("run-abc", "test", "abc123", P, {
+      includeStopField: false,
+      workflow: "research",
+    });
+
+    expect(info.workflow).toBe("research");
+    expect(mockWriteFileSync).toHaveBeenCalledWith(
+      join(P, ".gnhf", "runs", "run-abc", "workflow"),
+      "research\n",
+      "utf-8",
+    );
+    const schemaCall = mockWriteFileSync.mock.calls.find(
+      (call) =>
+        typeof call[0] === "string" && call[0].endsWith("output-schema.json"),
+    );
+    const schema = JSON.parse(schemaCall![1] as string);
+    expect(schema.required).toEqual(
+      expect.arrayContaining([
+        "evidence_origin",
+        "goals_changed",
+        "contracts_run",
+        "boundary",
+      ]),
+    );
+  });
+
+  it("leaves research fields out of the schema in the default workflow", () => {
+    setupRun("run-abc", "test", "abc123", P, { includeStopField: false });
+
+    const schemaCall = mockWriteFileSync.mock.calls.find(
+      (call) =>
+        typeof call[0] === "string" && call[0].endsWith("output-schema.json"),
+    );
+    const schema = JSON.parse(schemaCall![1] as string);
+    expect(schema.properties.evidence_origin).toBeUndefined();
+    expect(schema.required).not.toContain("evidence_origin");
+  });
+
+  it("creates an empty default ledger for a research run", () => {
+    const runDir = join(P, ".gnhf", "runs", "run-abc");
+    const info = setupRun("run-abc", "test", "abc123", P, {
+      includeStopField: false,
+      workflow: "research",
+    });
+
+    const ledgerPath = join(runDir, "ledger", "records.jsonl");
+    expect(info.ledgerPath).toBe(ledgerPath);
+    expect(mockMkdirSync).toHaveBeenCalledWith(join(runDir, "ledger"), {
+      recursive: true,
+    });
+    expect(mockWriteFileSync).toHaveBeenCalledWith(ledgerPath, "", "utf-8");
+    expect(mockWriteFileSync).not.toHaveBeenCalledWith(
+      join(runDir, "ledger-path"),
+      expect.any(String),
+      "utf-8",
+    );
+  });
+
+  it("keeps an existing ledger file when setting up a research run", () => {
+    const ledgerPath = join(
+      P,
+      ".gnhf",
+      "runs",
+      "run-abc",
+      "ledger",
+      "records.jsonl",
+    );
+    mockExistsSync.mockImplementation((path) => path === ledgerPath);
+
+    setupRun("run-abc", "test", "abc123", P, {
+      includeStopField: false,
+      workflow: "research",
+    });
+
+    expect(mockWriteFileSync).not.toHaveBeenCalledWith(
+      ledgerPath,
+      expect.any(String),
+      "utf-8",
+    );
+  });
+
+  it("stores a repo-relative --ledger path and resolves it against the repo", () => {
+    const runDir = join(P, ".gnhf", "runs", "run-abc");
+    const info = setupRun("run-abc", "test", "abc123", P, {
+      includeStopField: false,
+      workflow: "research",
+      ledger: "research/records.jsonl",
+    });
+
+    expect(info.ledgerPath).toBe(join(P, "research", "records.jsonl"));
+    expect(mockWriteFileSync).toHaveBeenCalledWith(
+      join(runDir, "ledger-path"),
+      "research/records.jsonl\n",
+      "utf-8",
+    );
+    expect(mockMkdirSync).toHaveBeenCalledWith(join(P, "research"), {
+      recursive: true,
+    });
+    expect(mockWriteFileSync).toHaveBeenCalledWith(
+      join(P, "research", "records.jsonl"),
+      "",
+      "utf-8",
+    );
+  });
+
+  it("uses an absolute --ledger path as given", () => {
+    const info = setupRun("run-abc", "test", "abc123", P, {
+      includeStopField: false,
+      workflow: "research",
+      ledger: "/elsewhere/ledger.jsonl",
+    });
+
+    expect(info.ledgerPath).toBe("/elsewhere/ledger.jsonl");
+  });
+
+  it("creates no ledger in the default workflow", () => {
+    const info = setupRun("run-abc", "test", "abc123", P, {
+      includeStopField: false,
+    });
+
+    expect(info.ledgerPath).toBeUndefined();
+    expect(mockWriteFileSync).not.toHaveBeenCalledWith(
+      expect.stringContaining("records.jsonl"),
+      expect.any(String),
+      "utf-8",
+    );
   });
 });
 
@@ -392,6 +535,175 @@ describe("resumeRun", () => {
 
     expect(info.stopWhen).toBe("all tests pass");
     expect(info.stopWhenPath).toBe(stopWhenPath);
+  });
+
+  it("keeps the stored ledger path when resuming without --ledger", () => {
+    const runDir = join(P, ".gnhf", "runs", "run-abc");
+    const workflowPath = join(runDir, "workflow");
+    const ledgerPathFile = join(runDir, "ledger-path");
+    mockExistsSync.mockImplementation(
+      (path) =>
+        path === runDir || path === workflowPath || path === ledgerPathFile,
+    );
+    mockReadFileSync.mockImplementation((path) =>
+      path === workflowPath
+        ? "research\n"
+        : path === ledgerPathFile
+          ? "research/records.jsonl\n"
+          : "",
+    );
+
+    const info = resumeRun("run-abc", P, { includeStopField: false });
+
+    expect(info.ledgerPath).toBe(join(P, "research", "records.jsonl"));
+    expect(mockWriteFileSync).not.toHaveBeenCalledWith(
+      ledgerPathFile,
+      expect.any(String),
+      "utf-8",
+    );
+  });
+
+  it("replaces the stored ledger path when resuming with --ledger", () => {
+    const runDir = join(P, ".gnhf", "runs", "run-abc");
+    const workflowPath = join(runDir, "workflow");
+    const ledgerPathFile = join(runDir, "ledger-path");
+    mockExistsSync.mockImplementation(
+      (path) =>
+        path === runDir || path === workflowPath || path === ledgerPathFile,
+    );
+    mockReadFileSync.mockImplementation((path) =>
+      path === workflowPath
+        ? "research\n"
+        : path === ledgerPathFile
+          ? "old.jsonl\n"
+          : "",
+    );
+
+    const info = resumeRun("run-abc", P, {
+      includeStopField: false,
+      ledger: "new.jsonl",
+    });
+
+    expect(info.ledgerPath).toBe(join(P, "new.jsonl"));
+    expect(mockWriteFileSync).toHaveBeenCalledWith(
+      ledgerPathFile,
+      "new.jsonl\n",
+      "utf-8",
+    );
+  });
+
+  it("uses the default ledger when a research run has no stored ledger path", () => {
+    const runDir = join(P, ".gnhf", "runs", "run-abc");
+    const workflowPath = join(runDir, "workflow");
+    mockExistsSync.mockImplementation(
+      (path) => path === runDir || path === workflowPath,
+    );
+    mockReadFileSync.mockImplementation((path) =>
+      path === workflowPath ? "research\n" : "",
+    );
+
+    const info = resumeRun("run-abc", P, { includeStopField: false });
+
+    expect(info.ledgerPath).toBe(join(runDir, "ledger", "records.jsonl"));
+  });
+
+  it("keeps the stored research workflow when no workflow is passed", () => {
+    const runDir = join(P, ".gnhf", "runs", "run-abc");
+    const workflowPath = join(runDir, "workflow");
+    mockExistsSync.mockImplementation(
+      (path) => path === runDir || path === workflowPath,
+    );
+    mockReadFileSync.mockImplementation((path) =>
+      path === workflowPath ? "research\n" : "",
+    );
+
+    const info = resumeRun("run-abc", P, { includeStopField: false });
+
+    expect(info.workflow).toBe("research");
+    expect(info.workflowPath).toBe(workflowPath);
+    expect(mockWriteFileSync).not.toHaveBeenCalledWith(
+      workflowPath,
+      expect.any(String),
+      "utf-8",
+    );
+    const schemaCall = mockWriteFileSync.mock.calls.find(
+      (call) =>
+        typeof call[0] === "string" && call[0].endsWith("output-schema.json"),
+    );
+    const schema = JSON.parse(schemaCall![1] as string);
+    expect(schema.required).toContain("evidence_origin");
+  });
+
+  it("treats a run without a workflow file as the default workflow", () => {
+    const runDir = join(P, ".gnhf", "runs", "run-abc");
+    mockExistsSync.mockImplementation((path) => path === runDir);
+
+    const info = resumeRun("run-abc", P, { includeStopField: false });
+
+    expect(info.workflow).toBe("default");
+    const schemaCall = mockWriteFileSync.mock.calls.find(
+      (call) =>
+        typeof call[0] === "string" && call[0].endsWith("output-schema.json"),
+    );
+    const schema = JSON.parse(schemaCall![1] as string);
+    expect(schema.properties.evidence_origin).toBeUndefined();
+  });
+
+  it("overrides the stored workflow and rewrites the schema when one is passed", () => {
+    const runDir = join(P, ".gnhf", "runs", "run-abc");
+    const workflowPath = join(runDir, "workflow");
+    mockExistsSync.mockImplementation(
+      (path) => path === runDir || path === workflowPath,
+    );
+    mockReadFileSync.mockImplementation((path) =>
+      path === workflowPath ? "research\n" : "",
+    );
+
+    const info = resumeRun("run-abc", P, {
+      includeStopField: false,
+      workflow: "default",
+    });
+
+    expect(info.workflow).toBe("default");
+    expect(mockWriteFileSync).toHaveBeenCalledWith(
+      workflowPath,
+      "default\n",
+      "utf-8",
+    );
+    const schemaCall = mockWriteFileSync.mock.calls.find(
+      (call) =>
+        typeof call[0] === "string" && call[0].endsWith("output-schema.json"),
+    );
+    const schema = JSON.parse(schemaCall![1] as string);
+    expect(schema.properties.evidence_origin).toBeUndefined();
+  });
+
+  it("rejects an unknown stored workflow", () => {
+    const runDir = join(P, ".gnhf", "runs", "run-abc");
+    const workflowPath = join(runDir, "workflow");
+    mockExistsSync.mockImplementation(
+      (path) => path === runDir || path === workflowPath,
+    );
+    mockReadFileSync.mockImplementation((path) =>
+      path === workflowPath ? "bogus\n" : "",
+    );
+
+    expect(() => resumeRun("run-abc", P, { includeStopField: false })).toThrow(
+      `Unknown workflow "bogus" in ${workflowPath}; pass --workflow default or --workflow research to replace it`,
+    );
+  });
+
+  it("rejects an empty stored workflow with a hint to replace it", () => {
+    const runDir = join(P, ".gnhf", "runs", "run-abc");
+    const workflowPath = join(runDir, "workflow");
+    mockExistsSync.mockImplementation(
+      (path) => path === runDir || path === workflowPath,
+    );
+    mockReadFileSync.mockImplementation(() => "\n");
+
+    expect(() => resumeRun("run-abc", P, { includeStopField: false })).toThrow(
+      `Unknown workflow "" in ${workflowPath}; pass --workflow default or --workflow research to replace it`,
+    );
   });
 
   it("returns undefined for stop-when when the file is missing", () => {
@@ -607,6 +919,40 @@ describe("appendNotes", () => {
     const content = mockAppendFileSync.mock.calls[0][1] as string;
     expect(content).not.toContain("**Learnings:**");
   });
+
+  it("writes no evidence line without research evidence", () => {
+    appendNotes("/notes.md", 1, "summary", ["change"], ["learning"]);
+    const content = mockAppendFileSync.mock.calls[0][1] as string;
+    expect(content).toBe(
+      "\n### Iteration 1\n\n**Summary:** summary\n\n**Changes:**\n- change\n\n**Learnings:**\n- learning\n",
+    );
+  });
+
+  it("adds one evidence line after the summary for research evidence", () => {
+    appendNotes("/notes.md", 4, "summary", ["change"], [], {
+      evidenceOrigin: "executed",
+      goalsChanged: ["G1", "G2"],
+      contractsRun: ["N5-1"],
+      boundary: "does not show behavior at scale",
+    });
+    const content = mockAppendFileSync.mock.calls[0][1] as string;
+    expect(content).toBe(
+      "\n### Iteration 4\n\n**Summary:** summary\n\n**Evidence:** executed. Goals changed: G1, G2. Contracts run: N5-1. Boundary: does not show behavior at scale\n\n**Changes:**\n- change\n\n",
+    );
+  });
+
+  it("writes none for empty research lists and boundary", () => {
+    appendNotes("/notes.md", 2, "summary", [], [], {
+      evidenceOrigin: "reasoning_only",
+      goalsChanged: [],
+      contractsRun: [],
+      boundary: "",
+    });
+    const content = mockAppendFileSync.mock.calls[0][1] as string;
+    expect(content).toContain(
+      "**Evidence:** reasoning_only. Goals changed: none. Contracts run: none. Boundary: none\n",
+    );
+  });
 });
 
 describe("toStringArray", () => {
@@ -640,22 +986,24 @@ describe("toStringArray", () => {
   });
 });
 
-describe("getCompletedIterationCount", () => {
+describe("getFinishedIterationCounts", () => {
   const runInfo = {
     logPath: "/repo/.gnhf/runs/run-abc/gnhf.log",
-  } as Parameters<typeof getCompletedIterationCount>[0];
+  } as Parameters<typeof getFinishedIterationCounts>[0];
 
   afterEach(() => {
-    mockExistsSync.mockReset();
-    mockExistsSync.mockReturnValue(false);
     mockReadFileSync.mockReset();
     mockReadFileSync.mockReturnValue("");
   });
 
-  it("returns 0 when the run log does not exist", () => {
+  it("returns zero counts when the run log does not exist", () => {
     mockExistsSync.mockReturnValue(false);
 
-    expect(getCompletedIterationCount(runInfo)).toBe(0);
+    expect(getFinishedIterationCounts(runInfo)).toEqual({
+      completed: 0,
+      successCount: 0,
+      failCount: 0,
+    });
     expect(mockReadFileSync).not.toHaveBeenCalled();
   });
 
@@ -663,7 +1011,7 @@ describe("getCompletedIterationCount", () => {
     mockExistsSync.mockReturnValue(true);
     mockReadFileSync.mockReturnValue(
       [
-        JSON.stringify({ event: "iteration:end", iteration: 1 }),
+        JSON.stringify({ event: "iteration:end", iteration: 1, success: true }),
         JSON.stringify({ event: "agent:run:start", iteration: 2 }),
         JSON.stringify({ event: "iteration:start", iteration: 2 }),
         "not json",
@@ -672,23 +1020,113 @@ describe("getCompletedIterationCount", () => {
       ].join("\n"),
     );
 
-    expect(getCompletedIterationCount(runInfo)).toBe(1);
+    expect(getFinishedIterationCounts(runInfo)).toEqual({
+      completed: 1,
+      successCount: 1,
+      failCount: 0,
+    });
   });
 
-  it("counts distinct finished iterations, including a failure", () => {
+  it("counts each finished iteration once by its last outcome", () => {
     mockExistsSync.mockReturnValue(true);
     mockReadFileSync.mockReturnValue(
       [
-        JSON.stringify({ event: "iteration:end", iteration: 1 }),
-        JSON.stringify({ event: "iteration:end", iteration: 1 }),
+        JSON.stringify({
+          event: "iteration:end",
+          iteration: 1,
+          success: false,
+        }),
+        JSON.stringify({ event: "iteration:end", iteration: 1, success: true }),
+        JSON.stringify({ event: "iteration:end", iteration: 2, success: true }),
         JSON.stringify({
           event: "iteration:end",
           iteration: 3,
           success: false,
         }),
+        JSON.stringify({ event: "iteration:end", iteration: 4 }),
       ].join("\n"),
     );
 
-    expect(getCompletedIterationCount(runInfo)).toBe(2);
+    expect(getFinishedIterationCounts(runInfo)).toEqual({
+      completed: 4,
+      successCount: 2,
+      failCount: 2,
+    });
+  });
+});
+
+describe("getInterruptedIteration", () => {
+  const runDir = "/repo/.gnhf/runs/run-abc";
+  const log = (...events: Record<string, unknown>[]) =>
+    events.map((event) => JSON.stringify(event)).join("\n");
+
+  afterEach(() => {
+    mockReadFileSync.mockReset();
+    mockReadFileSync.mockReturnValue("");
+  });
+
+  it("returns null when the run has no log", () => {
+    mockExistsSync.mockReturnValue(false);
+    expect(getInterruptedIteration(runDir)).toBeNull();
+    expect(mockReadFileSync).not.toHaveBeenCalled();
+  });
+
+  it("returns an iteration that started and never closed", () => {
+    mockExistsSync.mockReturnValue(true);
+    mockReadFileSync.mockReturnValue(
+      log(
+        { event: "iteration:start", iteration: 1 },
+        { event: "iteration:end", iteration: 1 },
+        { event: "iteration:start", iteration: 2 },
+        { event: "agent:run:start", iteration: 2 },
+      ),
+    );
+
+    expect(getInterruptedIteration(runDir)).toBe(2);
+    expect(mockReadFileSync).toHaveBeenCalledWith(
+      join(runDir, "gnhf.log"),
+      "utf-8",
+    );
+  });
+
+  it.each(["iteration:end", "iteration:aborted", "iteration:stopped"])(
+    "treats %s as closing the iteration",
+    (closing) => {
+      mockExistsSync.mockReturnValue(true);
+      mockReadFileSync.mockReturnValue(
+        log(
+          { event: "iteration:start", iteration: 2 },
+          { event: closing, iteration: 2 },
+        ),
+      );
+
+      expect(getInterruptedIteration(runDir)).toBeNull();
+    },
+  );
+
+  it("treats a completed run as closing an open iteration", () => {
+    mockExistsSync.mockReturnValue(true);
+    mockReadFileSync.mockReturnValue(
+      log(
+        { event: "iteration:start", iteration: 3 },
+        { event: "run:complete", iterations: 3 },
+      ),
+    );
+
+    expect(getInterruptedIteration(runDir)).toBeNull();
+  });
+
+  it("returns an iteration reopened by a later session that never closed", () => {
+    mockExistsSync.mockReturnValue(true);
+    mockReadFileSync.mockReturnValue(
+      log(
+        { event: "iteration:start", iteration: 4 },
+        { event: "run:complete", iterations: 4 },
+        { event: "run:start" },
+        { event: "iteration:start", iteration: 4 },
+      ),
+    );
+
+    expect(getInterruptedIteration(runDir)).toBe(4);
   });
 });

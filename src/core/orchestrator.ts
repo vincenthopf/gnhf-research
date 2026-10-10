@@ -1,5 +1,6 @@
 import { EventEmitter } from "node:events";
-import { join } from "node:path";
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { dirname, join } from "node:path";
 import {
   PermanentAgentError,
   RateLimitAgentError,
@@ -8,7 +9,7 @@ import {
   type TokenUsage,
   type UsageOverage,
 } from "./agents/types.js";
-import { redactAgentSpecForLogs, type Config } from "./config.js";
+import type { Config } from "./config.js";
 import type { RunInfo } from "./run.js";
 import { appendNotes, toStringArray } from "./run.js";
 import { appendDebugLog, serializeError } from "./debug-log.js";
@@ -28,8 +29,26 @@ import {
   type InterruptHint,
 } from "./interrupt-state.js";
 import { buildCommitMessage } from "./commit-message.js";
+import { formatDeadline } from "./deadline.js";
+import {
+  isLinePrefix,
+  longestValidPrefix,
+  readLedger,
+  validateLedger,
+  validatedLedgerPath,
+  writeRejectedLedger,
+} from "./ledger.js";
+import {
+  computeResearchStats,
+  readResearchHistory,
+  stallReports,
+  type ResearchHistoryEntry,
+  type ResearchStats,
+  type StallReport,
+} from "./research-stats.js";
 import { buildIterationPrompt } from "../templates/iteration-prompt.js";
 import { getTotalTokenCount } from "../utils/tokens.js";
+import type { ResearchEvidence } from "./workflow.js";
 
 export interface IterationRecord {
   number: number;
@@ -38,6 +57,7 @@ export interface IterationRecord {
   keyChanges: string[];
   keyLearnings: string[];
   timestamp: Date;
+  evidence?: ResearchEvidence;
 }
 
 export type { InterruptDisposition, InterruptHint } from "./interrupt-state.js";
@@ -57,8 +77,8 @@ export interface OrchestratorState {
   totalCacheReadTokens: number;
   totalCacheCreationTokens: number;
   // Sticky flag: true when at least one iteration's usage was reported as
-  // estimated (e.g. an ACP adapter that doesn't emit usage_update). Once set,
-  // it stays set for the rest of the run so totals are presented honestly.
+  // estimated. Once set, it stays set for the rest of the run so totals are
+  // presented honestly.
   tokensEstimated: boolean;
   commitCount: number;
   iterations: IterationRecord[];
@@ -71,6 +91,7 @@ export interface OrchestratorState {
   lastMessage: string | null;
   lastAgentError?: string | null;
   hasPendingCommitFailure?: boolean;
+  research?: ResearchStats;
 }
 
 export interface OrchestratorEvents {
@@ -87,10 +108,13 @@ export interface RunLimits {
   maxTokens?: number;
   maxRateLimitWaitMs?: number;
   stopWhen?: string;
+  until?: Date;
   push?: boolean;
   // Finished iterations restored on resume. Distinct from startIteration,
   // which follows the newest attempt log even when that attempt never ended.
   completedIterations?: number;
+  successCount?: number;
+  failCount?: number;
 }
 
 const STOP_CLOSE_AGENT_GRACE_MS = 250;
@@ -117,6 +141,17 @@ type ProviderResumeWait =
   | { kind: "elapsed"; resumeAt: Date }
   | { kind: "wait"; resumeAt: Date; waitMs: number; truncated: boolean };
 
+interface LedgerRejection {
+  reason: string;
+  rejectedPath: string;
+  source: "iteration" | "outside";
+}
+
+interface LedgerCheck {
+  keep: string;
+  rejection?: LedgerRejection;
+}
+
 type RunIterationResult =
   | {
       type: "completed";
@@ -141,6 +176,13 @@ export class Orchestrator extends EventEmitter<OrchestratorEvents> {
   private activeAbortController: AbortController | null = null;
   private pendingAbortReason: string | null = null;
   private pendingCommitFailure: string | null = null;
+  private pendingLedgerRejection: LedgerRejection | null = null;
+  private ledgerBaseline: string | undefined = undefined;
+  private wrapUpStopReason: string | null = null;
+  private researchHistory: ResearchHistoryEntry[] = [];
+  private observerLoggedIteration: number | null = null;
+  private validatedLedger = "";
+  private noProgressStreak = 0;
   private activeIterationTokensEstimated = false;
   private activeIterationOverage: UsageOverage | null = null;
   private fallbackModelActive = false;
@@ -199,11 +241,20 @@ export class Orchestrator extends EventEmitter<OrchestratorEvents> {
     if (limits.completedIterations !== undefined) {
       this.state.completedIterations = limits.completedIterations;
     }
+    this.state.successCount = limits.successCount ?? 0;
+    this.state.failCount = limits.failCount ?? 0;
     this.state.maxIterations = limits.maxIterations;
     this.state.commitCount = getBranchCommitCount(
       this.runInfo.baseCommit,
       this.cwd,
     );
+    if (this.runInfo.workflow === "research") {
+      this.researchHistory = readResearchHistory(this.runInfo.logPath);
+      this.validatedLedger = readLedger(
+        validatedLedgerPath(this.runInfo.runDir),
+      );
+      this.refreshResearchStats();
+    }
   }
 
   getState(): OrchestratorState {
@@ -303,11 +354,12 @@ export class Orchestrator extends EventEmitter<OrchestratorEvents> {
     this.emit("state", this.getState());
 
     appendDebugLog("orchestrator:start", {
-      agent: redactAgentSpecForLogs(this.agent.name),
+      agent: this.agent.name,
       runId: this.runInfo.runId,
       startIteration: this.state.currentIteration,
       maxIterations: this.limits.maxIterations,
       maxTokens: this.limits.maxTokens,
+      until: this.limits.until?.toISOString(),
       maxRateLimitWaitMs: this.limits.maxRateLimitWaitMs,
       push: this.limits.push === true,
       maxConsecutiveFailures: this.config.maxConsecutiveFailures,
@@ -331,16 +383,39 @@ export class Orchestrator extends EventEmitter<OrchestratorEvents> {
         this.emit("iteration:start", this.state.currentIteration);
         this.emit("state", this.getState());
 
+        this.ledgerBaseline = this.reconcileLedger(true);
+        const finalIteration = this.getFinalIteration();
+        this.wrapUpStopReason = finalIteration?.stopReason ?? null;
+        const guidance =
+          finalIteration === undefined ? this.researchGuidance() : {};
         const baseIterationPrompt = buildIterationPrompt({
           n: this.state.currentIteration,
           runId: this.runInfo.runId,
           prompt: this.prompt,
           stopWhen: this.limits.stopWhen,
           commitMessage: this.config.commitMessage,
+          workflow: this.runInfo.workflow,
+          ...(this.runInfo.ledgerPath === undefined
+            ? {}
+            : { ledgerPath: this.runInfo.ledgerPath }),
+          ...guidance,
+          ...(this.limits.until === undefined
+            ? {}
+            : { deadline: formatDeadline(this.limits.until) }),
+          ...(finalIteration === undefined
+            ? {}
+            : {
+                finalIteration: {
+                  reason: finalIteration.reason,
+                  wrapUpOnly: finalIteration.wrapUpOnly,
+                },
+              }),
         });
-        const iterationPrompt = this.pendingCommitFailure
-          ? this.buildCommitRepairPrompt(baseIterationPrompt)
-          : baseIterationPrompt;
+        const iterationPrompt = this.withLedgerRejection(
+          this.pendingCommitFailure
+            ? this.buildCommitRepairPrompt(baseIterationPrompt)
+            : baseIterationPrompt,
+        );
 
         appendDebugLog("iteration:start", {
           iteration: this.state.currentIteration,
@@ -419,6 +494,14 @@ export class Orchestrator extends EventEmitter<OrchestratorEvents> {
         this.consecutiveRateLimitWaits = 0;
         const { record } = result;
         this.state.iterations.push(record);
+        if (record.evidence !== undefined) {
+          this.researchHistory.push({
+            iteration: record.number,
+            success: record.success,
+            ...record.evidence,
+          });
+          this.refreshResearchStats();
+        }
         this.state.completedIterations =
           (this.state.completedIterations ?? 0) + 1;
         this.emit("iteration:end", record);
@@ -431,12 +514,16 @@ export class Orchestrator extends EventEmitter<OrchestratorEvents> {
           summary: record.summary,
           keyChanges: record.keyChanges.length,
           keyLearnings: record.keyLearnings.length,
+          ...record.evidence,
           consecutiveFailures: this.state.consecutiveFailures,
           totalInputTokens: this.state.totalInputTokens,
           totalOutputTokens: this.state.totalOutputTokens,
           tokensEstimated: this.state.tokensEstimated,
           commitCount: this.state.commitCount,
         });
+        if (record.evidence !== undefined) {
+          this.logResearchStall(record.number);
+        }
 
         if (result.abortReason) {
           this.abort(result.abortReason);
@@ -452,6 +539,12 @@ export class Orchestrator extends EventEmitter<OrchestratorEvents> {
           break;
         }
 
+        if (this.wrapUpStopReason !== null) {
+          this.state.lastAgentError = null;
+          this.abort(this.wrapUpStopReason);
+          break;
+        }
+
         const postIterationAbortReason = this.getPostIterationAbortReason();
         if (postIterationAbortReason) {
           this.abort(postIterationAbortReason);
@@ -459,7 +552,9 @@ export class Orchestrator extends EventEmitter<OrchestratorEvents> {
         }
 
         if (
-          this.state.consecutiveFailures >= this.config.maxConsecutiveFailures
+          this.state.consecutiveFailures >=
+            this.config.maxConsecutiveFailures &&
+          this.noProgressStreak < this.config.maxConsecutiveFailures
         ) {
           this.abort(
             `${this.config.maxConsecutiveFailures} consecutive failures`,
@@ -526,8 +621,12 @@ export class Orchestrator extends EventEmitter<OrchestratorEvents> {
         }
 
         if (this.state.consecutiveErrors > 0 && !this.stopRequested) {
-          const backoffMs =
-            60_000 * Math.pow(2, this.state.consecutiveErrors - 1);
+          const backoffMs = Math.min(
+            60_000 * Math.pow(2, this.state.consecutiveErrors - 1),
+            this.limits.until === undefined
+              ? Infinity
+              : Math.max(0, this.limits.until.getTime() - Date.now()),
+          );
           this.state.status = "waiting";
           this.state.waitingUntil = new Date(Date.now() + backoffMs);
           this.emit("state", this.getState());
@@ -568,6 +667,7 @@ export class Orchestrator extends EventEmitter<OrchestratorEvents> {
       } else {
         await this.closeAgent();
       }
+      this.reconcileLedger(false);
       this.loopDone = true;
       if (this.didStopWithoutForce()) {
         this.emitStopped();
@@ -636,7 +736,7 @@ export class Orchestrator extends EventEmitter<OrchestratorEvents> {
     const agentStartedAt = Date.now();
     appendDebugLog("agent:run:start", {
       iteration: this.state.currentIteration,
-      agent: redactAgentSpecForLogs(this.agent.name),
+      agent: this.agent.name,
       logPath,
     });
 
@@ -644,6 +744,7 @@ export class Orchestrator extends EventEmitter<OrchestratorEvents> {
       ? this.limits.fallbackModel
       : undefined;
     this.fallbackModelActive = false;
+    const ledgerSnapshot = this.ledgerBaseline;
 
     try {
       const result = await this.agent.run(prompt, this.cwd, {
@@ -686,6 +787,16 @@ export class Orchestrator extends EventEmitter<OrchestratorEvents> {
       }
 
       const shouldFullyStop = result.output.should_fully_stop === true;
+      const ledger = this.checkLedger(ledgerSnapshot);
+
+      if (ledger?.rejection !== undefined) {
+        const record = this.recordLedgerRejection(
+          result.output,
+          ledger.rejection,
+        );
+        this.settleLedger(ledger);
+        return { type: "completed", record, shouldFullyStop: false };
+      }
 
       if (result.output.success) {
         const record = this.recordSuccess(result.output);
@@ -700,16 +811,15 @@ export class Orchestrator extends EventEmitter<OrchestratorEvents> {
           ...(abortReason === undefined ? {} : { abortReason }),
         };
       }
-      return {
-        type: "completed",
-        record: this.recordFailure(
-          `[FAIL] ${result.output.summary}`,
-          result.output.summary,
-          toStringArray(result.output.key_learnings),
-          "reported",
-        ),
-        shouldFullyStop,
-      };
+      const failure = this.recordFailure(
+        `[FAIL] ${result.output.summary}`,
+        result.output.summary,
+        toStringArray(result.output.key_learnings),
+        "reported",
+        this.researchEvidence(result.output),
+      );
+      this.settleLedger(ledger);
+      return { type: "completed", record: failure, shouldFullyStop };
     } catch (err) {
       const elapsedMs = Date.now() - agentStartedAt;
       if (this.activeIterationTokensEstimated) {
@@ -772,30 +882,51 @@ export class Orchestrator extends EventEmitter<OrchestratorEvents> {
       }
 
       const summary = err instanceof Error ? err.message : String(err);
-      return {
-        type: "completed",
-        record: this.recordFailure(`[ERROR] ${summary}`, summary, [], "error"),
-        shouldFullyStop: false,
-      };
+      const ledger = this.checkLedger(ledgerSnapshot);
+      const record = this.recordFailure(
+        `[ERROR] ${summary}`,
+        summary,
+        ledger?.rejection === undefined
+          ? []
+          : [this.rejectedLedgerLearning(ledger.rejection)],
+        "error",
+      );
+      this.settleLedger(ledger);
+      return { type: "completed", record, shouldFullyStop: false };
     } finally {
       this.activeAbortController = null;
       this.pendingAbortReason = null;
     }
   }
 
+  private researchEvidence(output: AgentOutput): ResearchEvidence | undefined {
+    if (this.runInfo.workflow !== "research") return undefined;
+    return {
+      evidenceOrigin:
+        typeof output.evidence_origin === "string"
+          ? output.evidence_origin
+          : "none",
+      goalsChanged: toStringArray(output.goals_changed),
+      contractsRun: toStringArray(output.contracts_run),
+      boundary: typeof output.boundary === "string" ? output.boundary : "",
+    };
+  }
+
   private recordSuccess(output: AgentOutput): IterationRecord {
     const keyChanges = toStringArray(output.key_changes_made);
     const keyLearnings = toStringArray(output.key_learnings);
+    const evidence = this.researchEvidence(output);
     try {
-      commitAll(
+      const committed = commitAll(
         buildCommitMessage(this.config.commitMessage, output, {
           iteration: this.state.currentIteration,
         }),
         this.cwd,
       );
+      this.noProgressStreak = committed ? 0 : this.noProgressStreak + 1;
     } catch (error) {
       if (error instanceof CommitFailedError) {
-        return this.recordCommitFailure(error);
+        return this.recordCommitFailure(error, evidence);
       }
       throw error;
     }
@@ -807,6 +938,7 @@ export class Orchestrator extends EventEmitter<OrchestratorEvents> {
       output.summary,
       keyChanges,
       keyLearnings,
+      ...(evidence === undefined ? [] : [evidence]),
     );
     this.state.commitCount = getBranchCommitCount(
       this.runInfo.baseCommit,
@@ -823,6 +955,7 @@ export class Orchestrator extends EventEmitter<OrchestratorEvents> {
       keyChanges,
       keyLearnings,
       timestamp: new Date(),
+      ...(evidence === undefined ? {} : { evidence }),
     };
   }
 
@@ -842,8 +975,208 @@ ${this.pendingCommitFailure}
 \`\`\``;
   }
 
-  private recordCommitFailure(error: CommitFailedError): IterationRecord {
+  private withLedgerRejection(prompt: string): string {
+    const rejection = this.pendingLedgerRejection;
+    if (rejection === null) return prompt;
+    const origin =
+      rejection.source === "iteration"
+        ? `gnhf rejected the ledger written by the previous iteration: ${rejection.reason}.
+That iteration was marked failed, and the ledger was restored to its content from before that iteration.`
+        : `gnhf rejected ledger changes made outside a checked iteration, for example by an aborted, stopped, rate-limited or crashed iteration or by a manual edit: ${rejection.reason}.
+The ledger was restored to its last validated content.`;
+    return `${prompt}
+
+## Previous Ledger Rejection
+
+${origin}
+The rejected ledger is saved at ${rejection.rejectedPath}. Earlier lines must stay unchanged and every line must be a valid record. Append any records from the rejected file that are still valid as new lines.`;
+  }
+
+  private checkLedger(snapshot: string | undefined): LedgerCheck | undefined {
+    const ledgerPath = this.runInfo.ledgerPath;
+    if (ledgerPath === undefined || snapshot === undefined) return undefined;
+    const iteration = this.state.currentIteration;
+    const content = readLedger(ledgerPath);
+    const validation = validateLedger(snapshot, content);
+    this.pendingLedgerRejection = null;
+    if (validation.valid) {
+      appendDebugLog("ledger:valid", {
+        iteration,
+        records: validation.records,
+        appendedBytes: content.length - snapshot.length,
+      });
+      this.writeValidatedLedger(content);
+      return { keep: content };
+    }
+    const rejectedPath = writeRejectedLedger(
+      this.runInfo.runDir,
+      `rejected-iteration-${iteration}`,
+      content,
+    );
+    const rejection: LedgerRejection = {
+      reason: validation.reason,
+      rejectedPath,
+      source: "iteration",
+    };
+    appendDebugLog("ledger:invalid", { iteration, ...rejection });
+    this.pendingLedgerRejection = rejection;
+    this.writeValidatedLedger(snapshot);
+    return { keep: snapshot, rejection };
+  }
+
+  private reconcileLedger(rejectInvalid: boolean): string | undefined {
+    const ledgerPath = this.runInfo.ledgerPath;
+    if (ledgerPath === undefined) return undefined;
+    const iteration = this.state.currentIteration;
+    const validatedPath = validatedLedgerPath(this.runInfo.runDir);
+    const current = readLedger(ledgerPath);
+    const baseline = existsSync(validatedPath)
+      ? readFileSync(validatedPath, "utf-8")
+      : longestValidPrefix(current);
+    if (current === baseline) {
+      this.writeValidatedLedger(baseline);
+      return baseline;
+    }
+    const validation = validateLedger(baseline, current);
+    if (validation.valid) {
+      appendDebugLog("ledger:accepted", {
+        iteration,
+        records: validation.records,
+        appendedBytes: current.length - baseline.length,
+      });
+      this.writeValidatedLedger(current);
+      return current;
+    }
+    if (isLinePrefix(current, baseline)) {
+      appendDebugLog("ledger:restored", {
+        iteration,
+        restoredBytes: baseline.length - current.length,
+      });
+      this.writeLedgerFile(ledgerPath, baseline);
+      this.writeValidatedLedger(baseline);
+      return baseline;
+    }
+    if (!rejectInvalid) {
+      appendDebugLog("ledger:deferred", {
+        iteration,
+        reason: validation.reason,
+      });
+      return baseline;
+    }
+    const rejectedPath = writeRejectedLedger(
+      this.runInfo.runDir,
+      `rejected-before-iteration-${iteration}`,
+      current,
+    );
+    const rejection: LedgerRejection = {
+      reason: validation.reason,
+      rejectedPath,
+      source: "outside",
+    };
+    appendDebugLog("ledger:invalid", { iteration, ...rejection });
+    this.pendingLedgerRejection = rejection;
+    this.writeLedgerFile(ledgerPath, baseline);
+    this.writeValidatedLedger(baseline);
+    return baseline;
+  }
+
+  private writeValidatedLedger(content: string): void {
+    this.writeLedgerFile(validatedLedgerPath(this.runInfo.runDir), content);
+    if (content !== this.validatedLedger) {
+      this.validatedLedger = content;
+      this.refreshResearchStats();
+    }
+  }
+
+  private refreshResearchStats(): void {
+    if (this.runInfo.workflow !== "research") return;
+    this.state.research = computeResearchStats(
+      this.researchHistory,
+      this.validatedLedger,
+    );
+  }
+
+  private currentStall(): StallReport[] {
+    const stats = this.state.research;
+    return stats === undefined ? [] : stallReports(stats);
+  }
+
+  private logResearchStall(iteration: number): void {
+    const stall = this.currentStall();
+    if (stall.length === 0) return;
+    appendDebugLog("research:stall", {
+      iteration,
+      signals: stall.map((report) => report.signal),
+      goalsStale: this.state.research?.goalsStale,
+      reasoningStreak: this.state.research?.reasoningStreak,
+    });
+  }
+
+  private researchGuidance(): { stall?: StallReport[]; observerPass?: string } {
+    if (this.runInfo.workflow !== "research") return {};
+    const iteration = this.state.currentIteration;
+    const stall = this.currentStall();
+    const every = this.config.observerEvery;
+    const reasons = [
+      ...(stall.length > 0
+        ? [
+            `the stall signal fired after iteration ${this.researchHistory.at(-1)!.iteration}`,
+          ]
+        : []),
+      ...(every > 0 && iteration % every === 0
+        ? [`iteration ${iteration} is a multiple of observerEvery (${every})`]
+        : []),
+    ];
+    if (reasons.length > 0 && this.observerLoggedIteration !== iteration) {
+      this.observerLoggedIteration = iteration;
+      appendDebugLog("research:observer", { iteration, reasons });
+    }
+    return {
+      ...(stall.length > 0 ? { stall } : {}),
+      ...(reasons.length > 0 ? { observerPass: reasons.join(" and ") } : {}),
+    };
+  }
+
+  private writeLedgerFile(path: string, content: string): void {
+    if (existsSync(path) && readFileSync(path, "utf-8") === content) return;
+    mkdirSync(dirname(path), { recursive: true });
+    writeFileSync(path, content, "utf-8");
+  }
+
+  private settleLedger(ledger: LedgerCheck | undefined): void {
+    const ledgerPath = this.runInfo.ledgerPath;
+    if (ledger === undefined || ledgerPath === undefined) return;
+    this.writeLedgerFile(ledgerPath, ledger.keep);
+  }
+
+  private rejectedLedgerLearning(rejection: LedgerRejection): string {
+    return `Rejected ledger saved to ${rejection.rejectedPath}`;
+  }
+
+  private recordLedgerRejection(
+    output: AgentOutput,
+    rejection: LedgerRejection,
+  ): IterationRecord {
+    const summary = `ledger validation failed: ${rejection.reason}`;
+    return this.recordFailure(
+      `[FAIL] ${summary}`,
+      summary,
+      [
+        `Agent reported ${output.success ? "success" : "failure"}: ${output.summary}`,
+        this.rejectedLedgerLearning(rejection),
+        ...toStringArray(output.key_learnings),
+      ],
+      "reported",
+      this.researchEvidence(output),
+    );
+  }
+
+  private recordCommitFailure(
+    error: CommitFailedError,
+    evidence?: ResearchEvidence,
+  ): IterationRecord {
     this.pendingCommitFailure = error.detail;
+    this.noProgressStreak = 0;
     const summary = "git commit failed; asking agent to repair the workspace";
     appendNotes(
       this.runInfo.notesPath,
@@ -851,6 +1184,7 @@ ${this.pendingCommitFailure}
       `[ERROR] ${summary}`,
       [],
       [error.detail],
+      ...(evidence === undefined ? [] : [evidence]),
     );
     this.state.failCount++;
     this.state.consecutiveFailures++;
@@ -863,6 +1197,7 @@ ${this.pendingCommitFailure}
       keyChanges: [],
       keyLearnings: [error.detail],
       timestamp: new Date(),
+      ...(evidence === undefined ? {} : { evidence }),
     };
   }
 
@@ -888,6 +1223,7 @@ ${this.pendingCommitFailure}
     recordSummary: string,
     learnings: string[],
     kind: "reported" | "error",
+    evidence?: ResearchEvidence,
   ): IterationRecord {
     const hadPendingCommitFailure = this.pendingCommitFailure !== null;
     appendNotes(
@@ -896,6 +1232,7 @@ ${this.pendingCommitFailure}
       notesSummary,
       [],
       toStringArray(learnings),
+      ...(evidence === undefined ? [] : [evidence]),
     );
     if (!hadPendingCommitFailure) {
       resetHard(this.cwd);
@@ -910,6 +1247,7 @@ ${this.pendingCommitFailure}
       this.state.consecutiveErrors++;
       this.state.lastAgentError = recordSummary;
     } else {
+      this.noProgressStreak++;
       this.state.consecutiveErrors = 0;
       this.state.lastAgentError = null;
     }
@@ -920,6 +1258,7 @@ ${this.pendingCommitFailure}
       keyChanges: [],
       keyLearnings: toStringArray(learnings),
       timestamp: new Date(),
+      ...(evidence === undefined ? {} : { evidence }),
     };
   }
 
@@ -967,6 +1306,25 @@ ${this.pendingCommitFailure}
       }
       this.abort(
         `maximum rate-limit wait exceeded (${nextTotalWaitMs}ms > ${maxRateLimitWaitMs}ms)`,
+      );
+      return "stop";
+    }
+    if (
+      this.limits.until !== undefined &&
+      Date.now() + waitMs > this.limits.until.getTime()
+    ) {
+      appendDebugLog(`${logPrefix}:wait:past-deadline`, {
+        iteration: this.state.currentIteration,
+        message,
+        resumeAt: resumeAt?.toISOString() ?? null,
+        waitMs,
+        until: this.limits.until.toISOString(),
+      });
+      if (clearAgentErrorOnAbort) {
+        this.state.lastAgentError = null;
+      }
+      this.abort(
+        `deadline reached (${formatDeadline(this.limits.until)}) before the usage limit resets`,
       );
       return "stop";
     }
@@ -1063,6 +1421,40 @@ ${this.pendingCommitFailure}
         resolve();
       });
     });
+  }
+
+  private getFinalIteration():
+    | { reason: string; wrapUpOnly: boolean; stopReason?: string }
+    | undefined {
+    if (
+      this.limits.until !== undefined &&
+      Date.now() >= this.limits.until.getTime()
+    ) {
+      const deadline = formatDeadline(this.limits.until);
+      return {
+        reason: `the run deadline (${deadline}) has passed`,
+        wrapUpOnly: true,
+        stopReason: `deadline reached (${deadline})`,
+      };
+    }
+    const noProgressLimit = this.config.maxConsecutiveFailures;
+    if (this.noProgressStreak >= noProgressLimit) {
+      return {
+        reason: `the last ${noProgressLimit} iterations made no progress (no commit)`,
+        wrapUpOnly: true,
+        stopReason: `no progress in ${noProgressLimit} consecutive iterations`,
+      };
+    }
+    if (
+      this.limits.maxIterations !== undefined &&
+      this.state.currentIteration >= this.limits.maxIterations
+    ) {
+      return {
+        reason: `this is the last iteration allowed by --max-iterations (${this.limits.maxIterations})`,
+        wrapUpOnly: false,
+      };
+    }
+    return undefined;
   }
 
   private getPreIterationAbortReason(): string | null {

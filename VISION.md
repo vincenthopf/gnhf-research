@@ -27,11 +27,8 @@ New autonomy is welcome only when it arrives with a limit the user can set and a
 
 ## Small surface, wide reach
 
-gnhf is agent-agnostic: the loop, not any one vendor's CLI, is the product.
-The extension path for new agents is ACP; a new agent arrives as an `acp:` target or a registry override, not as new adapter code.
-A native adapter is permanent maintainer surface, so the native roster shrinks over time rather than grows.
-A native adapter is retired only when its ACP path keeps every key capability the native path had.
-Messy agent output is a fact of the ecosystem, so adapters recover schema-valid results from prose and fences before declaring an iteration lost.
+gnhf drives one agent, Claude Code: the loop is the product, and a single adapter keeps the maintainer surface small.
+Adding another agent is a scope change, not an adapter addition.
 When an agent fails, the real error surfaces with its full cause chain instead of being swallowed into a generic message.
 Surface saved on vendors is spent on users: serving more users with the same product is almost always desired.
 More operating systems and more install channels are welcome, and a shipped platform is never dropped to save maintenance.
@@ -41,7 +38,6 @@ More operating systems and more install channels are welcome, and a shipped plat
 Prompts, notes, run metadata, and logs live under `.gnhf/runs/` and stay local, so the branch only contains intentional work.
 Telemetry is anonymous, never carrying prompts, paths, or branch names, and a single env var turns it off.
 Richer diagnostics are welcome when they are opt-in, stay anonymous, and change nothing for anyone who does not enable them.
-Raw agent commands are redacted from logs, errors, and telemetry so local paths and secrets are never written out.
 Publishing is always an explicit user choice, such as `--push`.
 
 ## Delight is part of the contract

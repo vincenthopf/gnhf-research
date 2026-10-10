@@ -17,14 +17,14 @@ body:
 
         It sits right next to `notes.md` in the same directory. Open the repo where you ran gnhf, then look under `.gnhf/runs/` — each run has its own folder. The folder name is a slug of your prompt, so if you ran multiple times pick the one matching the run that failed.
 
-        **What the log contains** — agent/orchestrator lifecycle events, request timings, error cause chains, and a rolling snapshot of opencode server stderr. It does **not** contain your prompt text or any credentials, but the run ID is derived from your prompt slug, so redact that if it's sensitive.
+        **What the log contains** — agent/orchestrator lifecycle events, request timings, and error cause chains. It does **not** contain your prompt text or any credentials, but the run ID is derived from your prompt slug, so redact that if it's sensitive.
 
   - type: textarea
     id: summary
     attributes:
       label: What happened?
       description: A short description of what you expected and what actually happened.
-      placeholder: I ran `gnhf "refactor the auth module" --agent opencode` and after about 5 minutes every iteration started failing with "[ERROR] fetch failed" in notes.md.
+      placeholder: I ran `gnhf "refactor the auth module"` and after about 5 minutes every iteration started failing with "[ERROR] claude exited with code 1" in notes.md.
     validations:
       required: true
 
@@ -32,10 +32,10 @@ body:
     id: reproduction
     attributes:
       label: How to reproduce
-      description: The command you ran, the agent/model, and anything else you think matters.
+      description: The command you ran, the model, and anything else you think matters.
       placeholder: |
         1. In a clean git repo
-        2. Run `gnhf "…" --agent opencode`
+        2. Run `gnhf "…"`
         3. Wait for iteration 1 to finish
     validations:
       required: true
@@ -49,28 +49,12 @@ body:
     validations:
       required: true
 
-  - type: dropdown
-    id: agent
-    attributes:
-      label: Agent
-      options:
-        - claude
-        - codex
-        - rovodev
-        - opencode
-        - copilot
-        - pi
-        - cursor
-        - other / not sure
-    validations:
-      required: true
-
   - type: input
     id: model
     attributes:
-      label: Model / provider (if relevant)
-      description: For opencode, copilot, pi, or cursor this is especially useful - which provider and model were you using?
-      placeholder: "minimax / MiniMax-M2.7-highspeed"
+      label: Model (if relevant)
+      description: Which Claude model was the run using?
+      placeholder: "claude-opus-5-5"
 
   - type: input
     id: platform

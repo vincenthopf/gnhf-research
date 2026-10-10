@@ -13,6 +13,8 @@ import {
   RateLimitAgentError,
 } from "./types.js";
 import { shutdownChildProcess } from "./managed-process.js";
+import { appendDebugLog } from "../debug-log.js";
+import type { EffortLevel } from "../effort.js";
 import {
   appendExitOutputTail,
   describeChildProcessExit,
@@ -69,7 +71,10 @@ type ClaudeEvent =
   | { type: string };
 
 interface ClaudeAgentDeps {
+  agentsPath?: string;
+  appendSystemPromptPath?: string;
   bin?: string;
+  effort?: EffortLevel;
   extraArgs?: string[];
   finalResultGraceMs?: number;
   model?: string;
@@ -155,11 +160,24 @@ function isFinalStructuredResult(event: ClaudeResultEvent): boolean {
   );
 }
 
+interface ClaudeArgsOptions {
+  extraArgs?: string[];
+  model?: string;
+  effort?: EffortLevel;
+  agentsPath?: string;
+  appendSystemPromptPath?: string;
+}
+
 function buildClaudeArgs(
   prompt: string,
   schema: AgentOutputSchema,
-  extraArgs?: string[],
-  model?: string,
+  {
+    extraArgs,
+    model,
+    effort,
+    agentsPath,
+    appendSystemPromptPath,
+  }: ClaudeArgsOptions,
 ): string[] {
   const userArgs = (extraArgs ?? []).filter(
     (arg, index, args) =>
@@ -180,6 +198,11 @@ function buildClaudeArgs(
   return [
     ...userArgs,
     ...(model === undefined ? [] : ["--model", model]),
+    ...(effort === undefined ? [] : ["--effort", effort]),
+    ...(agentsPath === undefined ? [] : ["--agents", agentsPath]),
+    ...(appendSystemPromptPath === undefined
+      ? []
+      : ["--append-system-prompt-file", appendSystemPromptPath]),
     "-p",
     prompt,
     "--verbose",
@@ -247,7 +270,10 @@ function buildRateLimitError(
 export class ClaudeAgent implements Agent {
   name = "claude";
 
+  private agentsPath?: string;
+  private appendSystemPromptPath?: string;
   private bin: string;
+  private effort?: EffortLevel;
   private extraArgs?: string[];
   private finalResultGraceMs: number;
   private model?: string;
@@ -256,7 +282,10 @@ export class ClaudeAgent implements Agent {
 
   constructor(binOrDeps: string | ClaudeAgentDeps = {}) {
     const deps = typeof binOrDeps === "string" ? { bin: binOrDeps } : binOrDeps;
+    this.agentsPath = deps.agentsPath;
+    this.appendSystemPromptPath = deps.appendSystemPromptPath;
     this.bin = deps.bin ?? "claude";
+    this.effort = deps.effort;
     this.extraArgs = deps.extraArgs;
     this.finalResultGraceMs =
       deps.finalResultGraceMs ?? DEFAULT_FINAL_RESULT_EXIT_GRACE_MS;
@@ -275,15 +304,18 @@ export class ClaudeAgent implements Agent {
 
     return new Promise((resolve, reject) => {
       const logStream = logPath ? createWriteStream(logPath) : null;
+      const model = options?.model ?? this.model;
 
+      appendDebugLog("claude:spawn", { model, effort: this.effort });
       const child = spawn(
         this.bin,
-        buildClaudeArgs(
-          prompt,
-          this.schema,
-          this.extraArgs,
-          options?.model ?? this.model,
-        ),
+        buildClaudeArgs(prompt, this.schema, {
+          extraArgs: this.extraArgs,
+          model,
+          effort: this.effort,
+          agentsPath: this.agentsPath,
+          appendSystemPromptPath: this.appendSystemPromptPath,
+        }),
         {
           cwd,
           detached: this.platform !== "win32",

@@ -19,17 +19,16 @@ Releases are automated via release-please; never hand-edit `CHANGELOG.md` or `.r
 - `src/core/run.ts`: `.gnhf/runs/<runId>/` metadata (kept local via `.git/info/exclude`).
 - `src/core/orchestrator.ts`: the iteration loop, commit/rollback, backoff, usage-limit waits, and `RunLimits`.
 - `src/renderer.ts`: alt-screen TUI driven by orchestrator events; `--mock` drives it offline via `src/mock-orchestrator.ts`.
-- `src/core/agents/`: one module per agent implementing `Agent` in `types.ts`, picked by `factory.ts`. Start from `stream-utils.ts` for streaming and process lifecycle, and use `parseAgentOutput` to validate a new native agent's output.
+- `src/core/agents/`: `claude.ts` implements `Agent` from `types.ts` and is built by `factory.ts`; `stream-utils.ts` and `managed-process.ts` own streaming and process lifecycle. Claude is the only agent.
 - `src/core/config.ts`: `~/.gnhf/config.yml` loading; CLI flags override config.
 
 ## Invariants
 
-- Any flag gnhf controls must be listed in `isReservedAgentArg` (`src/core/config.ts`) so user arg overrides cannot shadow it.
-- Runtime-only flags (`--max-iterations`, `--max-tokens`, `--max-rate-limit-wait`, `--stop-when`) are never persisted to config; `--stop-when` is persisted per run for resume.
+- Any flag gnhf controls must be listed in `isReservedAgentArg` (`src/core/config.ts`) so user arg overrides cannot shadow it. Flags gnhf sets only from an optional config key (`--agents`, `--append-system-prompt[-file]`) are rejected as a conflict when that key is set, and pass through otherwise.
+- Runtime-only flags (`--max-iterations`, `--max-tokens`, `--max-rate-limit-wait`, `--until`, `--stop-when`, `--workflow`, `--ledger`) are never persisted to config; `--stop-when`, `--workflow` and `--ledger` are persisted per run for resume.
 - All git calls go through `execFileSync` with explicit argv in `src/core/git.ts`; add a `git.injection.test.ts` case whenever new user input flows into git args.
 - Worktree preservation (README "Worktree Mode") must hold on every exit path, including the `process.on("exit")` fallback and the force-exit timeout.
 - A sleep inhibitor that fails to start or confirm must never abort a run.
-- Raw ACP command specs are redacted to `acp:custom`/`custom` in debug logs, errors, and telemetry.
 - `providerResumeWait` in the orchestrator is the single owner of what a provider-reported reset time is worth.
 - Telemetry (`src/core/telemetry.ts`) sends one pageview at start and one `run` event at the end - never per-iteration, and never `cwd`, branch slug, prompt content, or anything identifying a user or repo. User-facing telemetry docs cover only the `GNHF_TELEMETRY=0` opt-out and that data is anonymous.
 

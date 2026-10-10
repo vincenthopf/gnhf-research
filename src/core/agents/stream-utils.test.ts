@@ -1,9 +1,9 @@
 import { EventEmitter } from "node:events";
 import { describe, it, expect, vi } from "vitest";
 import {
+  describeChildProcessExit,
   parseJSONLStream,
   setupAbortHandler,
-  setupChildProcessHandlers,
 } from "./stream-utils.js";
 
 function createMockChild() {
@@ -70,82 +70,28 @@ describe("parseJSONLStream", () => {
   });
 });
 
-describe("setupChildProcessHandlers", () => {
-  it("rejects with stderr content when the process exits non-zero", () => {
-    const child = createMockChild();
-    const reject = vi.fn();
-    const onSuccess = vi.fn();
-    const logStream = { end: vi.fn() };
-
-    setupChildProcessHandlers(
-      child as never,
-      "codex",
-      logStream as never,
-      reject,
-      onSuccess,
-    );
-
-    child.stderr.emit("data", Buffer.from("boom"));
-    child.emit("close", 2);
-
-    expect(logStream.end).toHaveBeenCalledTimes(1);
-    expect(onSuccess).not.toHaveBeenCalled();
-    expect(reject).toHaveBeenCalledWith(
-      new Error("codex exited with code 2: boom"),
+describe("describeChildProcessExit", () => {
+  it("quotes stderr content when the process exits non-zero", () => {
+    expect(describeChildProcessExit("claude", 2, "", "boom").detail).toBe(
+      "claude exited with code 2: boom",
     );
   });
 
-  it("rejects with a structured stdout error when stderr is empty", () => {
-    const child = createMockChild();
-    const reject = vi.fn();
-
-    setupChildProcessHandlers(child as never, "codex", null, reject, vi.fn());
-
-    child.stdout.emit(
-      "data",
-      Buffer.from('{"type":"error","error":{"message":"login required"}}\n'),
-    );
-    child.emit("close", 1);
-
-    expect(reject).toHaveBeenCalledWith(
-      new Error("codex exited with code 1: login required"),
-    );
+  it("uses a structured stdout error when stderr is empty", () => {
+    expect(
+      describeChildProcessExit(
+        "claude",
+        1,
+        '{"type":"error","error":{"message":"login required"}}\n',
+        "",
+      ).detail,
+    ).toBe("claude exited with code 1: login required");
   });
 
   it("says so when a non-zero exit produced no output", () => {
-    const child = createMockChild();
-    const reject = vi.fn();
-
-    setupChildProcessHandlers(child as never, "pi", null, reject, vi.fn());
-    child.emit("close", 1);
-
-    expect(reject).toHaveBeenCalledWith(
-      new Error("pi exited with code 1 and produced no output"),
+    expect(describeChildProcessExit("claude", 1, "", "").detail).toBe(
+      "claude exited with code 1 and produced no output",
     );
-  });
-
-  it("wraps spawn errors and resolves successful exits through the success callback", () => {
-    const child = createMockChild();
-    const reject = vi.fn();
-    const onSuccess = vi.fn();
-    const logStream = { end: vi.fn() };
-
-    setupChildProcessHandlers(
-      child as never,
-      "rovodev",
-      logStream as never,
-      reject,
-      onSuccess,
-    );
-
-    child.emit("error", new Error("ENOENT"));
-    expect(reject).toHaveBeenCalledWith(
-      new Error("Failed to spawn rovodev: ENOENT"),
-    );
-
-    child.emit("close", 0);
-    expect(logStream.end).toHaveBeenCalledTimes(1);
-    expect(onSuccess).toHaveBeenCalledTimes(1);
   });
 });
 

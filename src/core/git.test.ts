@@ -91,7 +91,7 @@ describe("git utilities", () => {
       createBranch("feature/test", "/repo");
       expect(mockExecFileSync).toHaveBeenCalledWith(
         "git",
-        ["checkout", "-b", "feature/test"],
+        ["checkout", "--no-track", "-b", "feature/test"],
         expect.objectContaining({
           cwd: "/repo",
           encoding: "utf-8",
@@ -158,6 +158,17 @@ describe("git utilities", () => {
   });
 
   describe("commitAll", () => {
+    it("returns true after committing staged changes", () => {
+      mockStagedChanges();
+
+      expect(commitAll("work", "/repo")).toBe(true);
+    });
+
+    it("returns false without committing when nothing is staged", () => {
+      expect(commitAll("work", "/repo")).toBe(false);
+      expect(mockExecFileSync).toHaveBeenCalledTimes(2);
+    });
+
     it("stages all files and passes the message as its own argv entry", () => {
       mockStagedChanges();
 
@@ -173,6 +184,23 @@ describe("git utilities", () => {
         "commit",
         "-m",
         "initial commit",
+      ]);
+    });
+
+    it("skips commit hooks when verify is false", () => {
+      mockStagedChanges();
+
+      commitAll("wip", "/repo", { verify: false });
+
+      expect(argsOfCall(2)).toEqual([
+        "-c",
+        "commit.gpgsign=false",
+        "-c",
+        "tag.gpgsign=false",
+        "commit",
+        "--no-verify",
+        "-m",
+        "wip",
       ]);
     });
 
@@ -246,42 +274,85 @@ describe("git utilities", () => {
   });
 
   describe("pushCurrentBranch", () => {
-    it("pushes to the configured upstream when one exists", () => {
+    function mockPushRepo(refInfo: string): void {
       mockExecFileSync.mockImplementation((_cmd, args) => {
         const argv = args as string[];
-        if (argv[0] === "rev-parse") return "origin/main\n";
-        return "";
-      });
-
-      pushCurrentBranch("/repo");
-
-      expect(argsOfCall(0)).toEqual([
-        "rev-parse",
-        "--abbrev-ref",
-        "--symbolic-full-name",
-        "@{upstream}",
-      ]);
-      expect(argsOfCall(1)).toEqual(["push"]);
-    });
-
-    it("sets origin as upstream when the branch has no upstream", () => {
-      mockExecFileSync.mockImplementation((_cmd, args) => {
-        const argv = args as string[];
-        if (argv[0] === "rev-parse") throw new Error("no upstream");
+        if (argv[0] === "symbolic-ref") return "gnhf/run\n";
+        if (argv[0] === "for-each-ref") return refInfo;
         if (argv[0] === "remote") return "git@example.com:org/repo.git\n";
         return "";
       });
+    }
+
+    it("pushes to the upstream when it tracks the same branch name", () => {
+      mockPushRepo("fork\trefs/heads/gnhf/run\tfork\n");
 
       pushCurrentBranch("/repo");
 
-      expect(argsOfCall(0)).toEqual([
-        "rev-parse",
-        "--abbrev-ref",
-        "--symbolic-full-name",
-        "@{upstream}",
+      expect(argsOfCall(0)).toEqual(["symbolic-ref", "--short", "HEAD"]);
+      expect(argsOfCall(1)).toEqual([
+        "for-each-ref",
+        "--format=%(upstream:remotename)%09%(upstream:remoteref)%09%(push:remotename)",
+        "refs/heads/gnhf/run",
       ]);
-      expect(argsOfCall(1)).toEqual(["remote", "get-url", "origin"]);
-      expect(argsOfCall(2)).toEqual(["push", "-u", "origin", "HEAD"]);
+      expect(argsOfCall(2)).toEqual([
+        "push",
+        "fork",
+        "HEAD:refs/heads/gnhf/run",
+      ]);
+    });
+
+    it("sets origin as upstream when the branch has no upstream", () => {
+      mockPushRepo("\t\t\n");
+
+      pushCurrentBranch("/repo");
+
+      expect(argsOfCall(2)).toEqual(["remote", "get-url", "origin"]);
+      expect(argsOfCall(3)).toEqual([
+        "push",
+        "-u",
+        "origin",
+        "HEAD:refs/heads/gnhf/run",
+      ]);
+    });
+
+    it("pushes to a same-named branch and tracks it when the upstream is a different branch", () => {
+      mockPushRepo("origin\trefs/heads/main\torigin\n");
+
+      pushCurrentBranch("/repo");
+
+      expect(argsOfCall(3)).toEqual([
+        "push",
+        "-u",
+        "origin",
+        "HEAD:refs/heads/gnhf/run",
+      ]);
+    });
+
+    it("pushes to the configured push remote without changing a triangular upstream", () => {
+      mockPushRepo("origin\trefs/heads/main\tfork\n");
+
+      pushCurrentBranch("/repo");
+
+      expect(argsOfCall(2)).toEqual([
+        "push",
+        "fork",
+        "HEAD:refs/heads/gnhf/run",
+      ]);
+    });
+
+    it("uses the default push remote when the branch has no upstream", () => {
+      mockPushRepo("\t\tfork\n");
+
+      pushCurrentBranch("/repo");
+
+      expect(argsOfCall(2)).toEqual(["remote", "get-url", "fork"]);
+      expect(argsOfCall(3)).toEqual([
+        "push",
+        "-u",
+        "fork",
+        "HEAD:refs/heads/gnhf/run",
+      ]);
     });
   });
 
@@ -445,6 +516,7 @@ describe("git utilities", () => {
       expect(argsOfCall(0)).toEqual([
         "worktree",
         "add",
+        "--no-track",
         "-b",
         "gnhf/my-branch",
         "/tmp/wt",

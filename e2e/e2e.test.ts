@@ -2,6 +2,7 @@ import { execFileSync, spawn } from "node:child_process";
 import {
   chmodSync,
   existsSync,
+  mkdirSync,
   mkdtempSync,
   readdirSync,
   readFileSync,
@@ -223,7 +224,7 @@ function createTestEnv(
       process.platform === "win32"
         ? `${windowsFixtureBinDir};${fixtureBinDir};${process.env.PATH ?? ""}`
         : `${fixtureBinDir}:${process.env.PATH ?? ""}`,
-    GNHF_MOCK_OPENCODE_LOG_PATH: mockLogPath,
+    GNHF_MOCK_CLAUDE_LOG_PATH: mockLogPath,
   };
 }
 
@@ -245,32 +246,29 @@ describe("gnhf e2e", () => {
     }
   });
 
-  it("runs one iteration from an argv prompt and cleans up the mock opencode server", async () => {
+  it("runs one iteration from an argv prompt and leaves no claude process behind", async () => {
     const cwd = createRepo();
     tempDirs.push(cwd);
     const logDir = mkdtempSync(join(tmpdir(), "gnhf-e2e-logs-"));
     tempDirs.push(logDir);
-    const mockLogPath = join(logDir, "mock-opencode.jsonl");
+    const mockLogPath = join(logDir, "mock-claude.jsonl");
 
-    const result = await runCli(
-      cwd,
-      ["ship it", "--agent", "opencode", "--max-iterations", "1"],
-      {
-        env: createTestEnv(mockLogPath, tempDirs),
-      },
-    );
+    const result = await runCli(cwd, ["ship it", "--max-iterations", "1"], {
+      env: createTestEnv(mockLogPath, tempDirs),
+    });
 
     expect(result.code).toBe(0);
     expect(result.stdout).toContain("gnhf stopped");
-    expect(result.stdout).toContain("opencode ran");
+    expect(result.stdout).toContain("claude ran");
     expect(result.stdout).toContain("max iterations reached (1)");
     expect(result.stdout).toContain("branch diff");
     expect(result.stdout).toContain("git log --oneline");
     expect(git(["rev-list", "--count", "HEAD"], cwd)).toBe("2");
     expect(git(["log", "-1", "--format=%s"], cwd)).toContain("gnhf 1:");
 
-    const startEvent = await waitForLogEvent(mockLogPath, "server:start");
-    expect(startEvent.command).toBe("serve");
+    const startEvent = await waitForLogEvent(mockLogPath, "spawn");
+    expect(startEvent.args).toEqual(expect.arrayContaining(["-p"]));
+    expect(String(startEvent.prompt)).toContain("ship it");
     expect(isProcessAlive(Number(startEvent.pid))).toBe(false);
 
     const debugLogPath = findRunLogPath(cwd);
@@ -281,119 +279,465 @@ describe("gnhf e2e", () => {
     expect(debugEvents).toContain("iteration:end");
     expect(debugEvents).toContain("agent:run:start");
     expect(debugEvents).toContain("agent:run:end");
-    expect(debugEvents).toContain("opencode:spawn");
-    expect(debugEvents).toContain("opencode:run:start");
-    expect(debugEvents).toContain("opencode:run:end");
     expect(debugEvents).toContain("run:complete");
   }, 30_000);
 
-  it("recovers an empty OpenCode turn in one CLI iteration", async () => {
+  it("tells the last capped iteration it is the final iteration", async () => {
     const cwd = createRepo();
     tempDirs.push(cwd);
     const logDir = mkdtempSync(join(tmpdir(), "gnhf-e2e-logs-"));
     tempDirs.push(logDir);
-    const mockLogPath = join(logDir, "mock-opencode.jsonl");
+    const mockLogPath = join(logDir, "mock-claude.jsonl");
 
-    const result = await runCli(
-      cwd,
-      ["ship it", "--agent", "opencode", "--max-iterations", "1"],
-      {
-        env: {
-          ...createTestEnv(mockLogPath, tempDirs),
-          GNHF_TELEMETRY: "0",
-          GNHF_MOCK_OPENCODE_EMPTY_FIRST: "1",
-        },
-      },
-    );
+    const result = await runCli(cwd, ["ship it", "--max-iterations", "2"], {
+      env: createTestEnv(mockLogPath, tempDirs),
+    });
 
     expect(result.code).toBe(0);
-    const serverEvents = readJsonLines(mockLogPath);
-    const sessions = serverEvents.filter(
-      (entry) => entry.event === "session:create",
-    );
-    expect(sessions).toHaveLength(1);
-    const prompts = serverEvents.filter(
-      (entry) => entry.event === "message:start",
-    );
+    expect(result.stdout).toContain("max iterations reached (2)");
+    const prompts = readJsonLines(mockLogPath)
+      .filter((entry) => entry.event === "spawn")
+      .map((entry) => String(entry.prompt));
     expect(prompts).toHaveLength(2);
-    expect(prompts.map((entry) => entry.sessionId)).toEqual([
-      sessions[0]!.sessionId,
-      sessions[0]!.sessionId,
-    ]);
-    const changes = serverEvents.filter(
-      (entry) => entry.event === "workspace:changed",
-    );
-    expect(changes).toHaveLength(1);
-    expect(git(["show", "HEAD:README.md"], cwd)).toBe(
-      `# fixture\n${String(changes[0]!.marker)}`,
-    );
-    expect(git(["rev-list", "--count", "main..HEAD"], cwd)).toBe("1");
-    expect(git(["status", "--porcelain"], cwd)).toBe("");
-
-    const debugEvents = readJsonLines(findRunLogPath(cwd));
-    expect(
-      debugEvents.filter((entry) => entry.event === "iteration:start"),
-    ).toHaveLength(1);
-    expect(
-      debugEvents.filter((entry) => entry.event === "iteration:end"),
-    ).toEqual([
-      expect.objectContaining({ iteration: 1, success: true, commitCount: 1 }),
-    ]);
-    expect(
-      debugEvents.find((entry) => entry.event === "agent:run:end"),
-    ).toMatchObject({
-      inputTokens: 20,
-      outputTokens: 10,
-      cacheReadTokens: 2,
-      cacheCreationTokens: 0,
-    });
+    expect(prompts[0]).not.toContain("## Final Iteration");
+    expect(prompts[1]).toContain("## Final Iteration");
+    expect(prompts[1]).toContain("--max-iterations (2)");
+    expect(git(["rev-list", "--count", "HEAD"], cwd)).toBe("3");
   }, 30_000);
 
-  it("fails the iteration when the OpenCode continuation is also empty", async () => {
+  it("runs the research workflow with research fields in the schema and prompt", async () => {
     const cwd = createRepo();
     tempDirs.push(cwd);
     const logDir = mkdtempSync(join(tmpdir(), "gnhf-e2e-logs-"));
     tempDirs.push(logDir);
-    const mockLogPath = join(logDir, "mock-opencode.jsonl");
+    const mockLogPath = join(logDir, "mock-claude.jsonl");
+    const env = createTestEnv(mockLogPath, tempDirs);
 
     const result = await runCli(
       cwd,
-      ["stay silent", "--agent", "opencode", "--max-iterations", "1"],
+      ["study it", "--workflow", "research", "--max-iterations", "1"],
+      { env },
+    );
+
+    expect(result.code).toBe(0);
+    const spawnEvent = await waitForLogEvent(mockLogPath, "spawn");
+    const args = spawnEvent.args as string[];
+    const schema = JSON.parse(args[args.indexOf("--json-schema") + 1]!) as {
+      required: string[];
+    };
+    expect(schema.required).toEqual(
+      expect.arrayContaining([
+        "evidence_origin",
+        "goals_changed",
+        "contracts_run",
+        "boundary",
+      ]),
+    );
+    expect(String(spawnEvent.prompt)).toContain("## Research Workflow");
+
+    const runDir = dirname(findRunLogPath(cwd));
+    expect(readFileSync(join(runDir, "workflow"), "utf-8")).toBe("research\n");
+    expect(readFileSync(join(runDir, "notes.md"), "utf-8")).toContain(
+      "**Evidence:** executed. Goals changed: G1. Contracts run: none. Boundary: mock boundary",
+    );
+    const endEvent = readJsonLines(join(runDir, "gnhf.log")).find(
+      (entry) => entry.event === "iteration:end",
+    );
+    expect(endEvent).toMatchObject({
+      evidenceOrigin: "executed",
+      goalsChanged: ["G1"],
+      contractsRun: [],
+      boundary: "mock boundary",
+    });
+
+    const resumed = await runCli(cwd, ["--max-iterations", "2"], { env });
+    expect(resumed.code).toBe(0);
+    const prompts = readJsonLines(mockLogPath)
+      .filter((entry) => entry.event === "spawn")
+      .map((entry) => String(entry.prompt));
+    expect(prompts).toHaveLength(2);
+    expect(prompts[1]).toContain("## Research Workflow");
+  }, 30_000);
+
+  it("asks for a change of approach after three reasoning_only iterations and prints research stats", async () => {
+    const cwd = createRepo();
+    tempDirs.push(cwd);
+    const logDir = mkdtempSync(join(tmpdir(), "gnhf-e2e-logs-"));
+    tempDirs.push(logDir);
+    const mockLogPath = join(logDir, "mock-claude.jsonl");
+    const env = {
+      ...createTestEnv(mockLogPath, tempDirs),
+      GNHF_MOCK_CLAUDE_EVIDENCE_ORIGIN: "reasoning_only",
+      GNHF_MOCK_CLAUDE_LEDGER: "append",
+    };
+
+    const result = await runCli(
+      cwd,
+      ["study it", "--workflow", "research", "--max-iterations", "5"],
+      { env },
+    );
+
+    expect(result.code).toBe(0);
+    expect(result.stdout).toContain("max iterations reached (5)");
+    const prompts = readJsonLines(mockLogPath)
+      .filter((entry) => entry.event === "spawn")
+      .map((entry) => String(entry.prompt));
+    expect(prompts).toHaveLength(5);
+    for (const prompt of prompts.slice(0, 3)) {
+      expect(prompt).not.toContain("## Change Approach");
+      expect(prompt).not.toContain("## Observer Pass");
+    }
+    expect(prompts[3]).toContain("## Change Approach");
+    expect(prompts[3]).toContain(
+      "- the last 3 research iterations were reasoning_only",
+    );
+    expect(prompts[3]).toContain("## Observer Pass");
+    expect(prompts[3]).toContain("observer-frontier-exposure");
+    expect(prompts[3]!.indexOf("## Observer Pass")).toBeLessThan(
+      prompts[3]!.indexOf("## Objective"),
+    );
+    expect(prompts[4]).toContain("## Final Iteration");
+    expect(prompts[4]).not.toContain("## Change Approach");
+    expect(prompts[4]).not.toContain("## Observer Pass");
+    expect(result.stdout).toContain(
+      "exec 0 · reason 5 · goals stale 0 · open contracts 0 · no boundary 5",
+    );
+    const runDir = dirname(findRunLogPath(cwd));
+    const stalls = readJsonLines(join(runDir, "gnhf.log")).filter(
+      (entry) => entry.event === "research:stall",
+    );
+    expect(stalls).toEqual([
+      expect.objectContaining({ iteration: 3, signals: ["reasoning"] }),
+    ]);
+
+    const resumed = await runCli(cwd, ["--max-iterations", "6"], { env });
+    expect(resumed.code).toBe(0);
+    expect(resumed.stdout).toContain(
+      "exec 0 · reason 6 · goals stale 0 · open contracts 0 · no boundary 6",
+    );
+    expect(resumed.stdout).toMatch(/6 total\s+6 good\s+0 failed/);
+  }, 30_000);
+
+  it("rejects an iteration that rewrites an earlier ledger line and tells the next iteration", async () => {
+    const cwd = createRepo();
+    tempDirs.push(cwd);
+    const logDir = mkdtempSync(join(tmpdir(), "gnhf-e2e-logs-"));
+    tempDirs.push(logDir);
+    const mockLogPath = join(logDir, "mock-claude.jsonl");
+
+    const result = await runCli(
+      cwd,
+      ["study it", "--workflow", "research", "--max-iterations", "3"],
       {
         env: {
           ...createTestEnv(mockLogPath, tempDirs),
-          GNHF_TELEMETRY: "0",
-          GNHF_MOCK_OPENCODE_ALWAYS_EMPTY: "1",
+          GNHF_MOCK_CLAUDE_LEDGER: "rewrite-iteration-2",
         },
       },
     );
 
     expect(result.code).toBe(0);
+    const runDir = dirname(findRunLogPath(cwd));
+    const ledgerPath = join(runDir, "ledger", "records.jsonl");
+    const mockEvents = readJsonLines(mockLogPath);
+    const prompts = mockEvents
+      .filter((entry) => entry.event === "spawn")
+      .map((entry) => String(entry.prompt));
+    const seen = mockEvents.filter((entry) => entry.event === "ledger:seen");
+    expect(prompts).toHaveLength(3);
+    expect(prompts[0]).toContain(`Ledger file: ${ledgerPath}`);
+    expect(seen.map((entry) => entry.iteration)).toEqual([1, 2, 3]);
+    expect(seen[0]!.content).toBe("");
+    const afterIteration1 = String(seen[1]!.content);
+    expect(JSON.parse(afterIteration1.trim())).toMatchObject({
+      id: "r1",
+      claim: "mock claim 1",
+    });
+    expect(seen[2]!.content).toBe(afterIteration1);
 
-    // One continuation only: the agent must not keep re-prompting an
-    // OpenCode turn that has already come back empty.
-    const prompts = readJsonLines(mockLogPath).filter(
-      (entry) => entry.event === "message:start",
+    const rejectedPath = join(runDir, "ledger", "rejected-iteration-2.jsonl");
+    expect(readFileSync(rejectedPath, "utf-8")).toContain("rewritten by mock");
+    expect(prompts[1]).not.toContain("## Previous Ledger Rejection");
+    expect(prompts[2]).toContain("## Previous Ledger Rejection");
+    expect(prompts[2]).toContain("line 1 changed (id r1)");
+    expect(prompts[2]).toContain(rejectedPath);
+    expect(readFileSync(ledgerPath, "utf-8")).toBe(
+      `${afterIteration1}${JSON.stringify({ id: "r3", iteration: 3, evidence_origin: "executed", claim: "mock claim 3" })}\n`,
+    );
+    expect(readFileSync(join(runDir, "notes.md"), "utf-8")).toContain(
+      "[FAIL] ledger validation failed: line 1 changed (id r1)",
+    );
+    const events = readJsonLines(join(runDir, "gnhf.log"));
+    expect(events.filter((entry) => entry.event === "ledger:invalid")).toEqual([
+      expect.objectContaining({
+        iteration: 2,
+        reason: "line 1 changed (id r1)",
+        rejectedPath,
+      }),
+    ]);
+    expect(git(["rev-list", "--count", "HEAD"], cwd)).toBe("3");
+  }, 30_000);
+
+  it("rejects a partial ledger line left by a killed run when it resumes", async () => {
+    const cwd = createRepo();
+    tempDirs.push(cwd);
+    const logDir = mkdtempSync(join(tmpdir(), "gnhf-e2e-logs-"));
+    tempDirs.push(logDir);
+    const mockLogPath = join(logDir, "mock-claude.jsonl");
+    const env = {
+      ...createTestEnv(mockLogPath, tempDirs),
+      GNHF_MOCK_CLAUDE_LEDGER: "append",
+    };
+
+    const first = await runCli(
+      cwd,
+      ["study it", "--workflow", "research", "--max-iterations", "1"],
+      { env },
+    );
+    expect(first.code).toBe(0);
+    const runDir = dirname(findRunLogPath(cwd));
+    const ledgerPath = join(runDir, "ledger", "records.jsonl");
+    const afterIteration1 = readFileSync(ledgerPath, "utf-8");
+    const partial = `${afterIteration1}{"id":"r2","itera`;
+    writeFileSync(ledgerPath, partial, "utf-8");
+
+    const resumed = await runCli(cwd, ["--max-iterations", "2"], { env });
+    expect(resumed.code).toBe(0);
+
+    const prompts = readJsonLines(mockLogPath)
+      .filter((entry) => entry.event === "spawn")
+      .map((entry) => String(entry.prompt));
+    const rejectedPath = join(
+      runDir,
+      "ledger",
+      "rejected-before-iteration-2.jsonl",
     );
     expect(prompts).toHaveLength(2);
-
-    const debugLogPath = findRunLogPath(cwd);
-    expect(
-      readJsonLines(debugLogPath).find(
-        (entry) => entry.event === "iteration:end",
-      ),
-    ).toMatchObject({ success: false, commitCount: 0 });
-
-    // The morning-after trace: the user reads notes.md.
-    const notes = readFileSync(
-      join(dirname(debugLogPath), "notes.md"),
-      "utf-8",
+    expect(prompts[1]).toContain("## Previous Ledger Rejection");
+    expect(prompts[1]).toContain("made outside a checked iteration");
+    expect(prompts[1]).toContain(rejectedPath);
+    expect(readFileSync(rejectedPath, "utf-8")).toBe(partial);
+    const ids = readFileSync(ledgerPath, "utf-8")
+      .trim()
+      .split("\n")
+      .map((line) => (JSON.parse(line) as { id: string }).id);
+    expect(ids).toEqual(["r1", "r2"]);
+    expect(readFileSync(join(runDir, "notes.md"), "utf-8")).not.toContain(
+      "ledger validation failed",
     );
-    expect(notes).toContain("[ERROR] OpenCode produced no final answer");
+  }, 30_000);
 
-    // The failed iteration's workspace edits are rolled back, not committed.
+  it("keeps a --ledger path when the run resumes without the flag", async () => {
+    const cwd = createRepo();
+    tempDirs.push(cwd);
+    const logDir = mkdtempSync(join(tmpdir(), "gnhf-e2e-logs-"));
+    tempDirs.push(logDir);
+    const mockLogPath = join(logDir, "mock-claude.jsonl");
+    const env = {
+      ...createTestEnv(mockLogPath, tempDirs),
+      GNHF_MOCK_CLAUDE_LEDGER: "append",
+    };
+
+    const first = await runCli(
+      cwd,
+      [
+        "study it",
+        "--workflow",
+        "research",
+        "--ledger",
+        "research/records.jsonl",
+        "--max-iterations",
+        "1",
+      ],
+      { env },
+    );
+    expect(first.code).toBe(0);
+
+    const resumed = await runCli(cwd, ["--max-iterations", "2"], { env });
+    expect(resumed.code).toBe(0);
+
+    const ledgerPath = join(cwd, "research", "records.jsonl");
+    const prompts = readJsonLines(mockLogPath)
+      .filter((entry) => entry.event === "spawn")
+      .map((entry) => String(entry.prompt));
+    expect(prompts).toHaveLength(2);
+    expect(prompts[1]).toContain(`Ledger file: ${ledgerPath}`);
+    const ids = readFileSync(ledgerPath, "utf-8")
+      .trim()
+      .split("\n")
+      .map((line) => (JSON.parse(line) as { id: string }).id);
+    expect(ids).toEqual(["r1", "r2"]);
+    const runDir = dirname(findRunLogPath(cwd));
+    expect(readFileSync(join(runDir, "ledger-path"), "utf-8")).toBe(
+      "research/records.jsonl\n",
+    );
+    expect(existsSync(join(runDir, "ledger", "records.jsonl"))).toBe(false);
+    expect(git(["show", "HEAD:research/records.jsonl"], cwd)).toContain(
+      '"id":"r2"',
+    );
+  }, 30_000);
+
+  it("rejects --ledger without --workflow research before spawning claude", async () => {
+    const cwd = createRepo();
+    tempDirs.push(cwd);
+    const logDir = mkdtempSync(join(tmpdir(), "gnhf-e2e-logs-"));
+    tempDirs.push(logDir);
+    const mockLogPath = join(logDir, "mock-claude.jsonl");
+
+    const result = await runCli(cwd, ["ship it", "--ledger", "l.jsonl"], {
+      env: createTestEnv(mockLogPath, tempDirs),
+    });
+
+    expect(result.code).toBe(1);
+    expect(result.stderr).toContain("--ledger requires --workflow research");
+    expect(existsSync(mockLogPath)).toBe(false);
+    expect(existsSync(join(cwd, ".gnhf", "runs"))).toBe(false);
+  }, 30_000);
+
+  it("leaves research fields out of the default workflow", async () => {
+    const cwd = createRepo();
+    tempDirs.push(cwd);
+    const logDir = mkdtempSync(join(tmpdir(), "gnhf-e2e-logs-"));
+    tempDirs.push(logDir);
+    const mockLogPath = join(logDir, "mock-claude.jsonl");
+
+    const result = await runCli(cwd, ["ship it", "--max-iterations", "1"], {
+      env: createTestEnv(mockLogPath, tempDirs),
+    });
+
+    expect(result.code).toBe(0);
+    const spawnEvent = await waitForLogEvent(mockLogPath, "spawn");
+    const args = spawnEvent.args as string[];
+    expect(args[args.indexOf("--json-schema") + 1]).not.toContain(
+      "evidence_origin",
+    );
+    expect(String(spawnEvent.prompt)).not.toContain("## Research Workflow");
+    const runDir = dirname(findRunLogPath(cwd));
+    expect(readFileSync(join(runDir, "workflow"), "utf-8")).toBe("default\n");
+    expect(readFileSync(join(runDir, "notes.md"), "utf-8")).not.toContain(
+      "**Evidence:**",
+    );
+  }, 30_000);
+
+  it("rejects an unknown --workflow before spawning claude", async () => {
+    const cwd = createRepo();
+    tempDirs.push(cwd);
+    const logDir = mkdtempSync(join(tmpdir(), "gnhf-e2e-logs-"));
+    tempDirs.push(logDir);
+    const mockLogPath = join(logDir, "mock-claude.jsonl");
+
+    const result = await runCli(cwd, ["ship it", "--workflow", "bogus"], {
+      env: createTestEnv(mockLogPath, tempDirs),
+    });
+
+    expect(result.code).toBe(1);
+    expect(result.stderr).toContain("--workflow");
+    expect(result.stderr).toContain("must be one of: default or research");
+    expect(existsSync(mockLogPath)).toBe(false);
+    expect(existsSync(join(cwd, ".gnhf", "runs"))).toBe(false);
+  }, 30_000);
+
+  it("wraps up and stops after three iterations that change nothing", async () => {
+    const cwd = createRepo();
+    tempDirs.push(cwd);
+    const logDir = mkdtempSync(join(tmpdir(), "gnhf-e2e-logs-"));
+    tempDirs.push(logDir);
+    const mockLogPath = join(logDir, "mock-claude.jsonl");
+
+    const result = await runCli(cwd, ["ship it", "--max-iterations", "10"], {
+      env: {
+        ...createTestEnv(mockLogPath, tempDirs),
+        GNHF_MOCK_CLAUDE_NO_CHANGES: "1",
+      },
+    });
+
+    expect(result.code).toBe(0);
+    expect(result.stdout).toContain("no progress in 3 consecutive iterations");
+    const prompts = readJsonLines(mockLogPath)
+      .filter((entry) => entry.event === "spawn")
+      .map((entry) => String(entry.prompt));
+    expect(prompts).toHaveLength(4);
+    expect(prompts[2]).not.toContain("## Final Iteration");
+    expect(prompts[3]).toContain("## Final Iteration");
+    expect(prompts[3]).toContain("made no progress");
+    expect(prompts[3]).toContain("Do not start new work");
     expect(git(["rev-list", "--count", "HEAD"], cwd)).toBe("1");
-    expect(git(["status", "--porcelain"], cwd)).toBe("");
+  }, 30_000);
+
+  it("runs only a wrap-up iteration when --until has already passed", async () => {
+    const cwd = createRepo();
+    tempDirs.push(cwd);
+    const logDir = mkdtempSync(join(tmpdir(), "gnhf-e2e-logs-"));
+    tempDirs.push(logDir);
+    const mockLogPath = join(logDir, "mock-claude.jsonl");
+
+    const result = await runCli(
+      cwd,
+      ["ship it", "--until", "2020-01-01T00:00:00Z"],
+      { env: createTestEnv(mockLogPath, tempDirs) },
+    );
+
+    expect(result.code).toBe(0);
+    expect(result.stdout).toContain("deadline reached");
+    const prompts = readJsonLines(mockLogPath)
+      .filter((entry) => entry.event === "spawn")
+      .map((entry) => String(entry.prompt));
+    expect(prompts).toHaveLength(1);
+    expect(prompts[0]).toContain("## Deadline");
+    expect(prompts[0]).toContain("## Final Iteration");
+    expect(prompts[0]).toContain("Do not start new work");
+    expect(git(["log", "-1", "--format=%s"], cwd)).toContain("gnhf 1:");
+  }, 30_000);
+
+  it("rejects an --until value that is not a time", async () => {
+    const cwd = createRepo();
+    tempDirs.push(cwd);
+    const logDir = mkdtempSync(join(tmpdir(), "gnhf-e2e-logs-"));
+    tempDirs.push(logDir);
+    const mockLogPath = join(logDir, "mock-claude.jsonl");
+
+    const result = await runCli(cwd, ["ship it", "--until", "tomorrow"], {
+      env: createTestEnv(mockLogPath, tempDirs),
+    });
+
+    expect(result.code).not.toBe(0);
+    expect(result.stderr).toContain("--until");
+    expect(result.stderr).toContain("HH:MM");
+    expect(existsSync(mockLogPath)).toBe(false);
+  }, 30_000);
+
+  it("passes agents and appendSystemPrompt files from config to claude", async () => {
+    const cwd = createRepo();
+    tempDirs.push(cwd);
+    const logDir = mkdtempSync(join(tmpdir(), "gnhf-e2e-logs-"));
+    tempDirs.push(logDir);
+    const mockLogPath = join(logDir, "mock-claude.jsonl");
+    const env = createTestEnv(mockLogPath, tempDirs);
+    const configDir = join(env.HOME!, ".gnhf");
+    mkdirSync(configDir, { recursive: true });
+    writeFileSync(
+      join(configDir, "agents.json"),
+      '{"probe":{"description":"d","prompt":"p"}}',
+    );
+    writeFileSync(join(configDir, "system.md"), "extra rules");
+    writeFileSync(
+      join(configDir, "config.yml"),
+      "agents: agents.json\nappendSystemPrompt: ./system.md\n",
+    );
+
+    const result = await runCli(cwd, ["ship it", "--max-iterations", "1"], {
+      env,
+    });
+
+    expect(result.code).toBe(0);
+    const spawnEvent = await waitForLogEvent(mockLogPath, "spawn");
+    const args = spawnEvent.args as string[];
+    expect(args[args.indexOf("--agents") + 1]).toBe(
+      join(configDir, "agents.json"),
+    );
+    expect(args[args.indexOf("--append-system-prompt-file") + 1]).toBe(
+      join(configDir, "system.md"),
+    );
   }, 30_000);
 
   it("runs on the current branch and pushes each successful iteration", async () => {
@@ -406,14 +750,12 @@ describe("gnhf e2e", () => {
 
     const logDir = mkdtempSync(join(tmpdir(), "gnhf-e2e-logs-"));
     tempDirs.push(logDir);
-    const mockLogPath = join(logDir, "mock-opencode.jsonl");
+    const mockLogPath = join(logDir, "mock-claude.jsonl");
 
     const result = await runCli(
       cwd,
       [
         "ship it on main",
-        "--agent",
-        "opencode",
         "--max-iterations",
         "1",
         "--current-branch",
@@ -436,6 +778,74 @@ describe("gnhf e2e", () => {
     expect(debugEvents).toContain("git:push:success");
   }, 30_000);
 
+  it("pushes a branch that tracks origin/main to its own origin branch", async () => {
+    const cwd = createRepo();
+    tempDirs.push(cwd);
+    const remote = mkdtempSync(join(tmpdir(), "gnhf-e2e-remote-"));
+    tempDirs.push(remote);
+    git(["init", "--bare"], remote);
+    git(["remote", "add", "origin", remote], cwd);
+    git(["push", "-u", "origin", "main"], cwd);
+    git(["switch", "-c", "run-branch", "--track", "origin/main"], cwd);
+    const mainBefore = git(["rev-parse", "refs/heads/main"], remote);
+
+    const logDir = mkdtempSync(join(tmpdir(), "gnhf-e2e-logs-"));
+    tempDirs.push(logDir);
+    const mockLogPath = join(logDir, "mock-claude.jsonl");
+
+    const result = await runCli(
+      cwd,
+      ["ship it", "--max-iterations", "1", "--current-branch", "--push"],
+      {
+        env: createTestEnv(mockLogPath, tempDirs),
+      },
+    );
+
+    expect(result.code).toBe(0);
+    expect(git(["rev-parse", "refs/heads/main"], remote)).toBe(mainBefore);
+    expect(git(["rev-parse", "refs/heads/run-branch"], remote)).toBe(
+      git(["rev-parse", "HEAD"], cwd),
+    );
+    expect(git(["rev-parse", "--abbrev-ref", "@{upstream}"], cwd)).toBe(
+      "origin/run-branch",
+    );
+  }, 30_000);
+
+  it("creates gnhf branches without inheriting the current upstream", async () => {
+    const cwd = createRepo();
+    tempDirs.push(cwd);
+    const remote = mkdtempSync(join(tmpdir(), "gnhf-e2e-remote-"));
+    tempDirs.push(remote);
+    git(["init", "--bare"], remote);
+    git(["remote", "add", "origin", remote], cwd);
+    git(["push", "-u", "origin", "main"], cwd);
+    git(["config", "branch.autoSetupMerge", "inherit"], cwd);
+    const mainBefore = git(["rev-parse", "refs/heads/main"], remote);
+
+    const logDir = mkdtempSync(join(tmpdir(), "gnhf-e2e-logs-"));
+    tempDirs.push(logDir);
+    const mockLogPath = join(logDir, "mock-claude.jsonl");
+
+    const result = await runCli(
+      cwd,
+      ["ship it", "--max-iterations", "1", "--push"],
+      {
+        env: createTestEnv(mockLogPath, tempDirs),
+      },
+    );
+
+    expect(result.code).toBe(0);
+    const branch = git(["branch", "--show-current"], cwd);
+    expect(branch).toMatch(/^gnhf\//);
+    expect(git(["rev-parse", "refs/heads/main"], remote)).toBe(mainBefore);
+    expect(git(["rev-parse", `refs/heads/${branch}`], remote)).toBe(
+      git(["rev-parse", "HEAD"], cwd),
+    );
+    expect(git(["rev-parse", "--abbrev-ref", "@{upstream}"], cwd)).toBe(
+      `origin/${branch}`,
+    );
+  }, 30_000);
+
   it("sends failed pre-commit hook output back to the agent for repair", async () => {
     const cwd = createRepo();
     tempDirs.push(cwd);
@@ -456,21 +866,15 @@ describe("gnhf e2e", () => {
 
     const logDir = mkdtempSync(join(tmpdir(), "gnhf-e2e-logs-"));
     tempDirs.push(logDir);
-    const mockLogPath = join(logDir, "mock-opencode.jsonl");
+    const mockLogPath = join(logDir, "mock-claude.jsonl");
 
     const result = await runCli(
       cwd,
-      [
-        "trigger pre-commit repair",
-        "--agent",
-        "opencode",
-        "--max-iterations",
-        "2",
-      ],
+      ["trigger pre-commit repair", "--max-iterations", "2"],
       {
         env: {
           ...createTestEnv(mockLogPath, tempDirs),
-          GNHF_MOCK_OPENCODE_PRECOMMIT_REPAIR: "1",
+          GNHF_MOCK_CLAUDE_PRECOMMIT_REPAIR: "1",
         },
       },
     );
@@ -501,70 +905,6 @@ describe("gnhf e2e", () => {
     expect(debugEvents).not.toContain("git:commit:no-verify-fallback");
   }, 30_000);
 
-  it("reports an OpenCode provider overload as a clear retryable error, not a JSON parse failure", async () => {
-    const cwd = createRepo();
-    tempDirs.push(cwd);
-    const logDir = mkdtempSync(join(tmpdir(), "gnhf-e2e-logs-"));
-    tempDirs.push(logDir);
-    const mockLogPath = join(logDir, "mock-opencode.jsonl");
-
-    const result = await runCli(
-      cwd,
-      [
-        "trigger overload",
-        "--agent",
-        "opencode",
-        "--max-iterations",
-        "1",
-        "--prevent-sleep",
-        "off",
-      ],
-      {
-        env: {
-          ...createTestEnv(mockLogPath, tempDirs),
-          GNHF_MOCK_OPENCODE_OVERLOAD: "1",
-        },
-      },
-    );
-
-    expect(result.code).toBe(0);
-
-    const debugLogPath = findRunLogPath(cwd);
-    const debugEntries = readJsonLines(debugLogPath);
-    const debugEvents = debugEntries.map((entry) => entry.event);
-
-    // The overload event must surface under its own debug-log category so
-    // future investigations land in the right place immediately.
-    expect(debugEvents).toContain("opencode:stream:provider-error");
-    const providerErrorEntry = debugEntries.find(
-      (entry) => entry.event === "opencode:stream:provider-error",
-    );
-    expect(providerErrorEntry?.code).toBe("server_is_overloaded");
-    expect(providerErrorEntry?.type).toBe("service_unavailable_error");
-    expect(providerErrorEntry?.retryable).toBe(true);
-
-    // The agent run must record the actual cause, not a JSON parse failure.
-    const agentRunErrorEntry = debugEntries.find(
-      (entry) => entry.event === "agent:run:error",
-    );
-    expect(agentRunErrorEntry).toBeDefined();
-    const agentError = agentRunErrorEntry?.error as
-      | { message?: string }
-      | undefined;
-    expect(agentError?.message).toContain("OpenCode provider overloaded");
-    expect(agentError?.message).not.toContain(
-      "Failed to parse opencode output",
-    );
-
-    // Iteration is recorded as an error (retryable) - which feeds the
-    // orchestrator's backoff streak rather than aborting the run.
-    expect(debugEvents).toContain("iteration:end");
-    const iterationEnd = debugEntries.find(
-      (entry) => entry.event === "iteration:end",
-    );
-    expect(iterationEnd?.success).toBe(false);
-  }, 30_000);
-
   it.each([
     {
       label: "carried on stdout",
@@ -584,19 +924,11 @@ describe("gnhf e2e", () => {
       tempDirs.push(cwd);
       const logDir = mkdtempSync(join(tmpdir(), "gnhf-e2e-logs-"));
       tempDirs.push(logDir);
-      const mockLogPath = join(logDir, "mock-opencode.jsonl");
+      const mockLogPath = join(logDir, "mock-claude.jsonl");
 
       const result = await runCli(
         cwd,
-        [
-          "break the build",
-          "--agent",
-          "claude",
-          "--max-iterations",
-          "1",
-          "--prevent-sleep",
-          "off",
-        ],
+        ["break the build", "--max-iterations", "1", "--prevent-sleep", "off"],
         {
           env: {
             ...createTestEnv(mockLogPath, tempDirs),
@@ -632,19 +964,11 @@ describe("gnhf e2e", () => {
     tempDirs.push(cwd);
     const logDir = mkdtempSync(join(tmpdir(), "gnhf-e2e-logs-"));
     tempDirs.push(logDir);
-    const mockLogPath = join(logDir, "mock-opencode.jsonl");
+    const mockLogPath = join(logDir, "mock-claude.jsonl");
 
     const result = await runCli(
       cwd,
-      [
-        "ship it",
-        "--agent",
-        "claude",
-        "--max-iterations",
-        "3",
-        "--prevent-sleep",
-        "off",
-      ],
+      ["ship it", "--max-iterations", "3", "--prevent-sleep", "off"],
       {
         env: {
           ...createTestEnv(mockLogPath, tempDirs),
@@ -673,19 +997,11 @@ describe("gnhf e2e", () => {
     tempDirs.push(cwd);
     const logDir = mkdtempSync(join(tmpdir(), "gnhf-e2e-logs-"));
     tempDirs.push(logDir);
-    const mockLogPath = join(logDir, "mock-opencode.jsonl");
+    const mockLogPath = join(logDir, "mock-claude.jsonl");
 
     const result = await runCli(
       cwd,
-      [
-        "ship it",
-        "--agent",
-        "claude",
-        "--max-iterations",
-        "3",
-        "--prevent-sleep",
-        "off",
-      ],
+      ["ship it", "--max-iterations", "3", "--prevent-sleep", "off"],
       {
         env: {
           ...createTestEnv(mockLogPath, tempDirs),
@@ -715,18 +1031,11 @@ describe("gnhf e2e", () => {
     tempDirs.push(cwd);
     const logDir = mkdtempSync(join(tmpdir(), "gnhf-e2e-logs-"));
     tempDirs.push(logDir);
-    const mockLogPath = join(logDir, "mock-opencode.jsonl");
+    const mockLogPath = join(logDir, "mock-claude.jsonl");
 
     const result = await runCli(
       cwd,
-      [
-        "--agent",
-        "opencode",
-        "--max-iterations",
-        "1",
-        "--prevent-sleep",
-        "off",
-      ],
+      ["--max-iterations", "1", "--prevent-sleep", "off"],
       {
         stdin: "ship it from stdin\n",
         env: createTestEnv(mockLogPath, tempDirs),
@@ -744,22 +1053,18 @@ describe("gnhf e2e", () => {
     tempDirs.push(cwd);
     const logDir = mkdtempSync(join(tmpdir(), "gnhf-e2e-logs-"));
     tempDirs.push(logDir);
-    const mockLogPath = join(logDir, "mock-opencode.jsonl");
+    const mockLogPath = join(logDir, "mock-claude.jsonl");
 
     const env = createTestEnv(mockLogPath, tempDirs);
 
     const firstRun = await runCli(
       cwd,
-      ["first prompt", "--agent", "opencode", "--max-iterations", "1"],
+      ["first prompt", "--max-iterations", "1"],
       { env },
     );
     expect(firstRun.code).toBe(0);
 
-    const secondRun = await runCli(
-      cwd,
-      ["--agent", "opencode", "--max-iterations", "2"],
-      { env },
-    );
+    const secondRun = await runCli(cwd, ["--max-iterations", "2"], { env });
     expect(secondRun.code).toBe(0);
     expect(git(["rev-list", "--count", "HEAD"], cwd)).toBe("3");
   }, 30_000);
@@ -771,7 +1076,7 @@ describe("gnhf e2e", () => {
       tempDirs.push(cwd);
       const logDir = mkdtempSync(join(tmpdir(), "gnhf-e2e-logs-"));
       tempDirs.push(logDir);
-      const mockLogPath = join(logDir, "mock-opencode.jsonl");
+      const mockLogPath = join(logDir, "mock-claude.jsonl");
       const mockPids = new Set<number>();
 
       const killPid = (pid: number) => {
@@ -788,8 +1093,6 @@ describe("gnhf e2e", () => {
           [
             distCliPath,
             ...(prompt === undefined ? [] : [prompt]),
-            "--agent",
-            "opencode",
             "--max-iterations",
             "3",
             "--prevent-sleep",
@@ -801,7 +1104,7 @@ describe("gnhf e2e", () => {
             cwd,
             env: {
               ...createTestEnv(mockLogPath, tempDirs),
-              GNHF_MOCK_OPENCODE_HANG_ITERATION: hangIteration,
+              GNHF_MOCK_CLAUDE_HANG_ITERATION: hangIteration,
             },
             stdio: ["pipe", "pipe", "pipe"],
           },
@@ -851,7 +1154,7 @@ describe("gnhf e2e", () => {
         expect(finished).toEqual([1]);
       } finally {
         for (const entry of readJsonLines(mockLogPath)) {
-          if (entry.event === "server:start" && typeof entry.pid === "number") {
+          if (entry.event === "spawn" && typeof entry.pid === "number") {
             mockPids.add(entry.pid);
           }
         }
@@ -867,11 +1170,120 @@ describe("gnhf e2e", () => {
         resumed.child.kill("SIGKILL");
         await resumed.exited.catch(() => undefined);
         for (const entry of readJsonLines(mockLogPath)) {
-          if (entry.event === "server:start" && typeof entry.pid === "number") {
+          if (entry.event === "spawn" && typeof entry.pid === "number") {
             killPid(entry.pid);
           }
         }
       }
+    },
+    30_000,
+  );
+
+  it.skipIf(process.platform === "win32").each([
+    { mode: "gnhf branch", resumeArgs: [] as string[] },
+    {
+      mode: "current branch",
+      resumeArgs: ["ship it", "--current-branch"],
+    },
+    { mode: "worktree", resumeArgs: ["ship it", "--worktree"] },
+  ])(
+    "commits the dirty tree of a crashed iteration as wip on resume ($mode)",
+    async ({ resumeArgs }) => {
+      const repo = createRepo();
+      tempDirs.push(repo, `${repo}-gnhf-worktrees`);
+      const baseCommit = git(["rev-parse", "HEAD"], repo);
+      const logDir = mkdtempSync(join(tmpdir(), "gnhf-e2e-logs-"));
+      tempDirs.push(logDir);
+      const mockLogPath = join(logDir, "mock-claude.jsonl");
+      const env = createTestEnv(mockLogPath, tempDirs);
+      const child = spawn(
+        process.execPath,
+        [
+          distCliPath,
+          "ship it",
+          ...resumeArgs.slice(1),
+          "--max-iterations",
+          "3",
+          "--prevent-sleep",
+          "off",
+          "--meteor-frequency",
+          "0",
+        ],
+        {
+          cwd: repo,
+          env: {
+            ...env,
+            GNHF_MOCK_CLAUDE_HANG_ITERATION: "2",
+            GNHF_MOCK_CLAUDE_DIRTY_BEFORE_HANG: "1",
+          },
+          stdio: ["pipe", "pipe", "pipe"],
+        },
+      );
+      child.stdin.end();
+      const exited = new Promise<void>((resolveExit) => {
+        child.on("close", () => resolveExit());
+      });
+      try {
+        await waitForLogMatch(
+          mockLogPath,
+          () =>
+            readJsonLines(mockLogPath).filter(
+              (entry) => entry.event === "workspace:changed",
+            ).length === 2,
+        );
+      } finally {
+        child.kill("SIGKILL");
+        await exited;
+        for (const entry of readJsonLines(mockLogPath)) {
+          if (entry.event === "spawn" && typeof entry.pid === "number") {
+            try {
+              process.kill(entry.pid, "SIGKILL");
+            } catch {
+              // Already gone.
+            }
+          }
+        }
+      }
+
+      const cwd = resumeArgs.includes("--worktree")
+        ? join(
+            `${repo}-gnhf-worktrees`,
+            readdirSync(`${repo}-gnhf-worktrees`)[0]!,
+          )
+        : repo;
+      const crashedMarker = readJsonLines(mockLogPath)
+        .filter((entry) => entry.event === "workspace:changed")
+        .at(-1)!.marker as string;
+      expect(git(["status", "--porcelain"], cwd)).not.toBe("");
+
+      const resumed = await runCli(
+        repo,
+        [...resumeArgs, "--max-iterations", "3", "--prevent-sleep", "off"],
+        { env },
+      );
+
+      expect(resumed.code).toBe(0);
+      expect(git(["status", "--porcelain"], cwd)).toBe("");
+      const subjects = git(
+        ["log", "--format=%s", `${baseCommit}..HEAD`],
+        cwd,
+      ).split("\n");
+      expect(subjects).toHaveLength(3);
+      expect(subjects[1]).toBe(
+        "gnhf 2: wip from interrupted iteration, recovered on resume",
+      );
+      expect(
+        git(["show", `HEAD~1:README.md`], cwd).includes(crashedMarker),
+      ).toBe(true);
+      const runsDir = join(cwd, ".gnhf", "runs");
+      const runId = readdirSync(runsDir)[0]!;
+      const notes = readFileSync(join(runsDir, runId, "notes.md"), "utf-8");
+      expect(notes).toContain("### Iteration 2");
+      expect(notes).toContain("[INTERRUPTED]");
+      const resumedPrompts = readJsonLines(mockLogPath)
+        .filter((entry) => entry.event === "message:start")
+        .map((entry) => String(entry.prompt));
+      expect(resumedPrompts.at(-1)).toContain("This is iteration 3.");
     },
     30_000,
   );
@@ -883,20 +1295,13 @@ describe("gnhf e2e", () => {
       tempDirs.push(cwd);
       const logDir = mkdtempSync(join(tmpdir(), "gnhf-e2e-logs-"));
       tempDirs.push(logDir);
-      const mockLogPath = join(logDir, "mock-opencode.jsonl");
+      const mockLogPath = join(logDir, "mock-claude.jsonl");
       const worktreeParent = `${cwd}-gnhf-worktrees`;
       tempDirs.push(worktreeParent);
 
       const result = await runCli(
         cwd,
-        [
-          "worktree test",
-          "--agent",
-          "opencode",
-          "--max-iterations",
-          "1",
-          "--worktree",
-        ],
+        ["worktree test", "--max-iterations", "1", "--worktree"],
         {
           env: createTestEnv(mockLogPath, tempDirs),
         },
@@ -951,7 +1356,7 @@ describe("gnhf e2e", () => {
       tempDirs.push(cwd);
       const logDir = mkdtempSync(join(tmpdir(), "gnhf-e2e-logs-"));
       tempDirs.push(logDir);
-      const mockLogPath = join(logDir, "mock-opencode.jsonl");
+      const mockLogPath = join(logDir, "mock-claude.jsonl");
       const worktreeParent = `${cwd}-gnhf-worktrees`;
       tempDirs.push(worktreeParent);
       const fakeBinDir = mkdtempSync(join(tmpdir(), "gnhf-e2e-bin-"));
@@ -985,14 +1390,7 @@ describe("gnhf e2e", () => {
 
       const result = await runCli(
         cwd,
-        [
-          "linux reexec worktree",
-          "--agent",
-          "opencode",
-          "--max-iterations",
-          "1",
-          "--worktree",
-        ],
+        ["linux reexec worktree", "--max-iterations", "1", "--worktree"],
         { env },
       );
 
@@ -1039,7 +1437,7 @@ describe("gnhf e2e", () => {
       tempDirs.push(cwd);
       const logDir = mkdtempSync(join(tmpdir(), "gnhf-e2e-logs-"));
       tempDirs.push(logDir);
-      const mockLogPath = join(logDir, "mock-opencode.jsonl");
+      const mockLogPath = join(logDir, "mock-claude.jsonl");
       const worktreeParent = `${cwd}-gnhf-worktrees`;
       tempDirs.push(worktreeParent);
 
@@ -1047,14 +1445,7 @@ describe("gnhf e2e", () => {
 
       const first = await runCli(
         cwd,
-        [
-          "resume probe",
-          "--agent",
-          "opencode",
-          "--max-iterations",
-          "1",
-          "--worktree",
-        ],
+        ["resume probe", "--max-iterations", "1", "--worktree"],
         { env },
       );
       expect(first.code).toBe(0);
@@ -1070,14 +1461,7 @@ describe("gnhf e2e", () => {
 
       const second = await runCli(
         cwd,
-        [
-          "resume probe",
-          "--agent",
-          "opencode",
-          "--max-iterations",
-          "2",
-          "--worktree",
-        ],
+        ["resume probe", "--max-iterations", "2", "--worktree"],
         { env },
       );
       expect(second.code).toBe(0);
@@ -1103,7 +1487,7 @@ describe("gnhf e2e", () => {
       tempDirs.push(cwd);
       const logDir = mkdtempSync(join(tmpdir(), "gnhf-e2e-logs-"));
       tempDirs.push(logDir);
-      const mockLogPath = join(logDir, "mock-opencode.jsonl");
+      const mockLogPath = join(logDir, "mock-claude.jsonl");
       const worktreeParent = `${cwd}-gnhf-worktrees`;
       tempDirs.push(worktreeParent);
 
@@ -1111,14 +1495,7 @@ describe("gnhf e2e", () => {
 
       const first = await runCli(
         cwd,
-        [
-          "branch guard probe",
-          "--agent",
-          "opencode",
-          "--max-iterations",
-          "1",
-          "--worktree",
-        ],
+        ["branch guard probe", "--max-iterations", "1", "--worktree"],
         { env },
       );
       expect(first.code).toBe(0);
@@ -1131,14 +1508,7 @@ describe("gnhf e2e", () => {
 
       const second = await runCli(
         cwd,
-        [
-          "branch guard probe",
-          "--agent",
-          "opencode",
-          "--max-iterations",
-          "2",
-          "--worktree",
-        ],
+        ["branch guard probe", "--max-iterations", "2", "--worktree"],
         { env },
       );
       expect(second.code).not.toBe(0);
@@ -1156,20 +1526,18 @@ describe("gnhf e2e", () => {
       tempDirs.push(cwd);
       const logDir = mkdtempSync(join(tmpdir(), "gnhf-e2e-logs-"));
       tempDirs.push(logDir);
-      const mockLogPath = join(logDir, "mock-opencode.jsonl");
+      const mockLogPath = join(logDir, "mock-claude.jsonl");
       const worktreeParent = `${cwd}-gnhf-worktrees`;
       // Register for cleanup in case test fails and worktree isn't removed
       tempDirs.push(worktreeParent);
 
-      // The "slow cleanup" prompt triggers special behavior in the mock opencode
-      // server: when it detects "slow cleanup" in the prompt text, the message
-      // handler deliberately never sends a response (it only listens for the
-      // request to close). This simulates a long-running agent that hasn't
+      // The "slow cleanup" prompt makes the mock claude CLI hang without
+      // producing a result. This simulates a long-running agent that hasn't
       // produced any commits. We then send SIGINT to trigger graceful shutdown,
       // which should cause gnhf to clean up the worktree (0 commits = auto-remove).
       const child = spawn(
         process.execPath,
-        [distCliPath, "slow cleanup", "--agent", "opencode", "--worktree"],
+        [distCliPath, "slow cleanup", "--worktree"],
         {
           cwd,
           env: createTestEnv(mockLogPath, tempDirs),
@@ -1193,7 +1561,7 @@ describe("gnhf e2e", () => {
         });
       });
 
-      // Wait for the mock server to start and receive the message. First SIGINT
+      // Wait for the mock claude CLI to receive the prompt. First SIGINT
       // requests graceful shutdown; second SIGINT forces the in-flight run to
       // abort so cleanup can complete.
       await waitForLogEvent(mockLogPath, "message:start");
@@ -1219,23 +1587,19 @@ describe("gnhf e2e", () => {
   // Windows has no POSIX signals; child.kill("SIGINT") force-terminates the
   // process tree without triggering the graceful shutdown path this test covers.
   it.skipIf(process.platform === "win32")(
-    "shuts down the agent server when gnhf receives SIGINT",
+    "shuts down the claude process when gnhf receives SIGINT",
     async () => {
       const cwd = createRepo();
       tempDirs.push(cwd);
       const logDir = mkdtempSync(join(tmpdir(), "gnhf-e2e-logs-"));
       tempDirs.push(logDir);
-      const mockLogPath = join(logDir, "mock-opencode.jsonl");
+      const mockLogPath = join(logDir, "mock-claude.jsonl");
 
-      const child = spawn(
-        process.execPath,
-        [distCliPath, "slow cleanup", "--agent", "opencode"],
-        {
-          cwd,
-          env: createTestEnv(mockLogPath, tempDirs),
-          stdio: ["pipe", "pipe", "pipe"],
-        },
-      );
+      const child = spawn(process.execPath, [distCliPath, "slow cleanup"], {
+        cwd,
+        env: createTestEnv(mockLogPath, tempDirs),
+        stdio: ["pipe", "pipe", "pipe"],
+      });
       child.stdin.end();
 
       const exitPromise = new Promise<RunResult>((resolveResult, reject) => {
@@ -1253,7 +1617,7 @@ describe("gnhf e2e", () => {
         });
       });
 
-      const startEvent = await waitForLogEvent(mockLogPath, "server:start");
+      const startEvent = await waitForLogEvent(mockLogPath, "spawn");
       await waitForLogEvent(mockLogPath, "message:start");
       child.kill("SIGINT");
       await new Promise((resolveDelay) => setTimeout(resolveDelay, 50));
@@ -1262,10 +1626,6 @@ describe("gnhf e2e", () => {
       const result = await exitPromise;
       expect(result.code).toBe(130);
       expect(isProcessAlive(Number(startEvent.pid))).toBe(false);
-
-      const mockEvents = readJsonLines(mockLogPath).map((entry) => entry.event);
-      expect(mockEvents).toContain("session:abort");
-      expect(mockEvents).toContain("session:delete");
 
       const debugLogPath = findRunLogPath(cwd);
       const debugEvents = readJsonLines(debugLogPath).map(

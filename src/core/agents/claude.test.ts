@@ -285,6 +285,73 @@ describe("ClaudeAgent", () => {
     expect(fallbackArgs).not.toContain("sonnet");
   });
 
+  it("passes the configured effort after the model", () => {
+    const proc = createMockProcess();
+    mockSpawn.mockReturnValue(proc);
+    const configuredAgent = new ClaudeAgent({
+      model: "claude-opus-5-5",
+      effort: "high",
+    });
+
+    configuredAgent.run("test prompt", "/work/dir");
+
+    expect(mockSpawn).toHaveBeenCalledWith(
+      "claude",
+      [
+        "--model",
+        "claude-opus-5-5",
+        "--effort",
+        "high",
+        "-p",
+        "test prompt",
+        "--verbose",
+        "--output-format",
+        "stream-json",
+        "--json-schema",
+        expect.any(String),
+        "--dangerously-skip-permissions",
+      ],
+      expect.any(Object),
+    );
+  });
+
+  it("keeps the configured effort when a per-run model override is used", () => {
+    const proc = createMockProcess();
+    mockSpawn.mockReturnValue(proc);
+    const configuredAgent = new ClaudeAgent({
+      model: "claude-opus-5-5",
+      effort: "low",
+    });
+
+    configuredAgent.run("test prompt", "/work/dir", { model: "haiku" });
+
+    const args = mockSpawn.mock.calls[0]![1] as string[];
+    expect(args.slice(0, 4)).toEqual(["--model", "haiku", "--effort", "low"]);
+  });
+
+  it("passes configured agents and system prompt files after the effort", () => {
+    const proc = createMockProcess();
+    mockSpawn.mockReturnValue(proc);
+    const configuredAgent = new ClaudeAgent({
+      effort: "medium",
+      agentsPath: "/cfg/agents.json",
+      appendSystemPromptPath: "/cfg/system.md",
+    });
+
+    configuredAgent.run("test prompt", "/work/dir");
+
+    const args = mockSpawn.mock.calls[0]![1] as string[];
+    expect(args.slice(0, 7)).toEqual([
+      "--effort",
+      "medium",
+      "--agents",
+      "/cfg/agents.json",
+      "--append-system-prompt-file",
+      "/cfg/system.md",
+      "-p",
+    ]);
+  });
+
   it("kills the full process tree on Windows when aborted", async () => {
     const proc = createMockProcess();
     Object.defineProperty(proc, "pid", { value: 5678 });

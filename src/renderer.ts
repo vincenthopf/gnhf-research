@@ -13,6 +13,10 @@ import { formatTokens, getTotalTokenCount } from "./utils/tokens.js";
 import { wordWrap } from "./utils/wordwrap.js";
 import type { Orchestrator, OrchestratorState } from "./core/orchestrator.js";
 import {
+  researchStatsSegments,
+  type ResearchStats,
+} from "./core/research-stats.js";
+import {
   type Cell,
   type Style,
   textToCells,
@@ -105,18 +109,8 @@ function restoreTerminalTitle(): string {
   return "\x1b[23;0t";
 }
 
-function eyebrowSegments(agentName: string): string[] {
-  // Render "acp:<target>" as two segments separated by the same dot used
-  // between "gnhf" and the agent name: "g n h f \u00b7 a c p \u00b7 claude".
-  if (agentName.startsWith("acp:")) {
-    const target = agentName.slice("acp:".length);
-    if (target.length > 0) return ["acp", target];
-  }
-  return [agentName];
-}
-
 export function renderTitleCells(agentName?: string): Cell[][] {
-  const segments = agentName ? eyebrowSegments(agentName) : [];
+  const segments = agentName ? [agentName] : [];
   const separator: Cell[] = [
     ...textToCells("  ", "normal"),
     ...textToCells("\u00b7", "dim"),
@@ -201,6 +195,18 @@ export function renderStatsCells(
   const separator = [...padding, ...textToCells("\u00b7", "dim"), ...padding];
   return segments.flatMap((segment, index) =>
     index === 0 ? segment : [...separator, ...segment],
+  );
+}
+
+export function renderResearchStatsCells(stats: ResearchStats): Cell[] {
+  const segments = researchStatsSegments(stats, true);
+  const padded = segments.join(" · ").length <= CONTENT_WIDTH;
+  const padding = padded ? textToCells(" ", "normal") : [];
+  const separator = [...padding, ...textToCells("\u00b7", "dim"), ...padding];
+  return segments.flatMap((segment, index) =>
+    index === 0
+      ? textToCells(segment, "normal")
+      : [...separator, ...textToCells(segment, "normal")],
   );
 }
 
@@ -560,6 +566,10 @@ export function buildContentCells(
         state.maxIterations,
       ),
     ] as Cell[][],
+    research:
+      state.research === undefined
+        ? ([] as Cell[][])
+        : [renderResearchStatsCells(state.research)],
     agent: [
       [],
       [],
@@ -578,6 +588,7 @@ export function buildContentCells(
     ...sections.art,
     ...sections.prompt,
     ...sections.stats,
+    ...sections.research,
     ...sections.agent,
     ...sections.moon,
   ];
@@ -587,6 +598,7 @@ export function buildContentCells(
     "eyebrow",
     "agent",
     "prompt",
+    "research",
   ];
 
   let rows = flattenSections();
@@ -607,6 +619,7 @@ export function buildContentCells(
       ...sections.art,
       ...sections.prompt,
       ...sections.stats,
+      ...sections.research,
       ...sections.agent,
     ].filter((row) => row.length > 0);
     const allowedMoonRows = Math.max(0, maxRows - nonMoonRows.length);

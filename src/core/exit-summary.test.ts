@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 import { renderExitSummary, stripExitSummaryAnsi } from "./exit-summary.js";
 
 const baseSummary = {
-  agentName: "opencode",
+  agentName: "claude",
   branchName: "gnhf/refactor-auth-flow",
   elapsedMs: 47 * 60_000 + 12_000,
   status: "stopped" as const,
@@ -37,7 +37,7 @@ describe("renderExitSummary", () => {
 
     expect(summary).toContain("✦ gnhf wrapped");
     expect(summary).toContain(
-      "opencode worked for 47m 12s on gnhf/refactor-auth-flow",
+      "claude worked for 47m 12s on gnhf/refactor-auth-flow",
     );
     expect(summary).toContain(
       "iterations      8 total       6 good       2 failed",
@@ -56,6 +56,37 @@ describe("renderExitSummary", () => {
       "too much        git push no-mistakes:\n  to review?      https://github.com/kunchenguid/no-mistakes",
     );
     expect(summary).not.toContain("moon log");
+  });
+
+  it("prints research stats below the files line for research runs", () => {
+    const summary = stripExitSummaryAnsi(
+      renderExitSummary({
+        ...baseSummary,
+        color: false,
+        research: {
+          executed: 3,
+          sourceRead: 0,
+          reasoningOnly: 1,
+          noEvidence: 0,
+          goalsStale: 2,
+          reasoningStreak: 0,
+          openContracts: 4,
+          missingBoundary: 1,
+        },
+      }),
+    );
+
+    expect(summary).toContain(
+      "files           7 added       9 updated    2 deleted\n  research        exec 3 · reason 1 · goals stale 2 · open contracts 4 · no boundary 1\n",
+    );
+  });
+
+  it("omits the research line without research stats", () => {
+    const summary = stripExitSummaryAnsi(
+      renderExitSummary({ ...baseSummary, color: false }),
+    );
+
+    expect(summary).not.toContain("research");
   });
 
   it("marks estimated token totals with a tilde", () => {
@@ -84,7 +115,7 @@ describe("renderExitSummary", () => {
 
     expect(summary).toContain("× gnhf stopped");
     expect(summary).toContain(
-      "opencode ran for 47m 12s before: 3 consecutive failures",
+      "claude ran for 47m 12s before: 3 consecutive failures",
     );
   });
 

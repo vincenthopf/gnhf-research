@@ -16,26 +16,7 @@ import type { Config } from "./core/config.js";
 import { stripExitSummaryAnsi } from "./core/exit-summary.js";
 import type { RunInfo } from "./core/run.js";
 
-const TEST_AGENT_NAMES = [
-  "claude",
-  "codex",
-  "rovodev",
-  "opencode",
-  "copilot",
-  "pi",
-  "cursor",
-];
-const TEST_IS_AGENT_SPEC = (name: string) => {
-  if (TEST_AGENT_NAMES.includes(name)) return true;
-  if (!name.startsWith("acp:")) return false;
-  const target = name.slice("acp:".length);
-  return target.length > 0 && target.trim() === target;
-};
-const TEST_REDACT_AGENT_SPEC = (name: string) => {
-  if (!name.startsWith("acp:")) return name;
-  const target = name.slice("acp:".length);
-  return /^[A-Za-z0-9][A-Za-z0-9._:-]*$/.test(target) ? name : "acp:custom";
-};
+const NO_FINISHED_ITERATIONS = { completed: 0, successCount: 0, failCount: 0 };
 
 const stubRunInfo: RunInfo = {
   runId: "run-abc",
@@ -50,6 +31,8 @@ const stubRunInfo: RunInfo = {
   stopWhen: undefined,
   commitMessagePath: "/repo/.gnhf/runs/run-abc/commit-message",
   commitMessage: undefined,
+  workflowPath: "/repo/.gnhf/runs/run-abc/workflow",
+  workflow: "default",
 };
 
 interface CliMockOverrides {
@@ -67,9 +50,10 @@ interface CliMockOverrides {
   worktreeExists?: ReturnType<typeof vi.fn>;
   getBranchDiffStats?: ReturnType<typeof vi.fn>;
   peekRunMetadata?: ReturnType<typeof vi.fn>;
+  setupRun?: ReturnType<typeof vi.fn>;
   resumeRun?: ReturnType<typeof vi.fn>;
   getLastIterationNumber?: ReturnType<typeof vi.fn>;
-  getCompletedIterationCount?: ReturnType<typeof vi.fn>;
+  getFinishedIterationCounts?: ReturnType<typeof vi.fn>;
   orchestratorStart?: ReturnType<typeof vi.fn>;
   orchestratorGetState?: ReturnType<typeof vi.fn>;
   readStdinText?: ReturnType<typeof vi.fn>;
@@ -111,7 +95,7 @@ async function runCliWithMocks(
 
   const loadConfig = vi.fn(() => config);
   const createAgent =
-    overrides.createAgent ?? vi.fn(() => ({ name: config.agent }));
+    overrides.createAgent ?? vi.fn(() => ({ name: "claude" }));
   const appendDebugLog = overrides.appendDebugLog ?? vi.fn();
   const initDebugLog = overrides.initDebugLog ?? vi.fn();
   const readStdinText =
@@ -126,13 +110,13 @@ async function runCliWithMocks(
   };
   let consoleErrorCalls: unknown[][] = [];
   let stdoutWriteCalls: unknown[][] = [];
-  const setupRun = vi.fn(() => stubRunInfo);
+  const setupRun = overrides.setupRun ?? vi.fn(() => stubRunInfo);
   const peekRunMetadata = overrides.peekRunMetadata ?? vi.fn(() => stubRunInfo);
   const resumeRun = overrides.resumeRun ?? vi.fn();
   const getLastIterationNumber =
     overrides.getLastIterationNumber ?? vi.fn(() => 0);
-  const getCompletedIterationCount =
-    overrides.getCompletedIterationCount ?? vi.fn(() => 0);
+  const getFinishedIterationCounts =
+    overrides.getFinishedIterationCounts ?? vi.fn(() => NO_FINISHED_ITERATIONS);
   const ensureCleanWorkingTree = overrides.ensureCleanWorkingTree ?? vi.fn();
   const writeRunEndState = overrides.writeRunEndState ?? vi.fn();
 
@@ -171,9 +155,6 @@ async function runCliWithMocks(
 
   vi.resetModules();
   vi.doMock("./core/config.js", () => ({
-    AGENT_NAMES: TEST_AGENT_NAMES,
-    isAgentSpec: TEST_IS_AGENT_SPEC,
-    redactAgentSpecForLogs: TEST_REDACT_AGENT_SPEC,
     loadConfig,
   }));
   vi.doMock("./core/debug-log.js", () => ({
@@ -185,6 +166,7 @@ async function runCliWithMocks(
         : { value: String(err) },
   }));
   vi.doMock("./core/git.js", () => ({
+    commitAll: vi.fn(),
     ensureCleanWorkingTree,
     createBranch: overrides.createBranch ?? vi.fn(),
     getHeadCommit: vi.fn(() => "abc123"),
@@ -213,7 +195,9 @@ async function runCliWithMocks(
     peekRunMetadata,
     resumeRun,
     getLastIterationNumber,
-    getCompletedIterationCount,
+    getFinishedIterationCounts,
+    getInterruptedIteration: vi.fn(() => null),
+    appendNotes: vi.fn(),
     writeRunEndState,
   }));
   vi.doMock("./core/stdin.js", () => ({ readStdinText }));
@@ -308,7 +292,7 @@ async function runCliWithMocks(
     peekRunMetadata,
     resumeRun,
     getLastIterationNumber,
-    getCompletedIterationCount,
+    getFinishedIterationCounts,
     orchestratorCtor,
     rendererCtor,
     orchestratorGetState,
@@ -395,16 +379,13 @@ async function runSigintCliTest({
 
   vi.resetModules();
   vi.doMock("./core/config.js", () => ({
-    AGENT_NAMES: TEST_AGENT_NAMES,
-    isAgentSpec: TEST_IS_AGENT_SPEC,
-    redactAgentSpecForLogs: TEST_REDACT_AGENT_SPEC,
     loadConfig: vi.fn(() => ({
-      agent: "claude",
       agentPathOverride: {},
       agentModel: {},
       agentArgsOverride: {},
-      acpRegistryOverrides: {},
+      effort: "medium",
       maxConsecutiveFailures: 3,
+      observerEvery: 5,
       preventSleep: false,
     })),
   }));
@@ -419,7 +400,7 @@ async function runSigintCliTest({
     peekRunMetadata: vi.fn(() => stubRunInfo),
     resumeRun: vi.fn(),
     getLastIterationNumber: vi.fn(() => 0),
-    getCompletedIterationCount: vi.fn(() => 0),
+    getFinishedIterationCounts: vi.fn(() => NO_FINISHED_ITERATIONS),
     writeRunEndState: vi.fn(),
   }));
   vi.doMock("./core/agents/factory.js", () => ({
@@ -511,6 +492,8 @@ async function runCliResumeWithActualRun(
   opts: {
     liveCommitMessage?: typeof CONVENTIONAL_COMMIT_MESSAGE;
     storedCommitMessage?: "default" | "conventional";
+    storedWorkflow?: "default" | "research";
+    storedLedgerPath?: string;
   } = {},
 ) {
   const originalArgv = [...process.argv];
@@ -534,6 +517,7 @@ async function runCliResumeWithActualRun(
   const stopWhenPath = join(runDir, "stop-when");
   const commitMessagePath = join(runDir, "commit-message");
   const schemaPath = join(runDir, "output-schema.json");
+  const workflowPath = join(runDir, "workflow");
   mkdirSync(runDir, { recursive: true });
   writeFileSync(promptPath, "existing prompt", "utf-8");
   writeFileSync(baseCommitPath, "abc123\n", "utf-8");
@@ -543,6 +527,16 @@ async function runCliResumeWithActualRun(
   if (opts.storedCommitMessage !== undefined) {
     writeFileSync(commitMessagePath, `${opts.storedCommitMessage}\n`, "utf-8");
   }
+  if (opts.storedWorkflow !== undefined) {
+    writeFileSync(workflowPath, `${opts.storedWorkflow}\n`, "utf-8");
+  }
+  if (opts.storedLedgerPath !== undefined) {
+    writeFileSync(
+      join(runDir, "ledger-path"),
+      `${opts.storedLedgerPath}\n`,
+      "utf-8",
+    );
+  }
 
   const appendDebugLog = vi.fn();
   const createAgent = vi.fn(() => ({ name: "claude" }));
@@ -551,19 +545,16 @@ async function runCliResumeWithActualRun(
   vi.resetModules();
   vi.doUnmock("./core/run.js");
   vi.doMock("./core/config.js", () => ({
-    AGENT_NAMES: TEST_AGENT_NAMES,
-    isAgentSpec: TEST_IS_AGENT_SPEC,
-    redactAgentSpecForLogs: TEST_REDACT_AGENT_SPEC,
     loadConfig: vi.fn(() => ({
-      agent: "claude",
       agentPathOverride: {},
       agentModel: {},
       agentArgsOverride: {},
-      acpRegistryOverrides: {},
       ...(opts.liveCommitMessage === undefined
         ? {}
         : { commitMessage: opts.liveCommitMessage }),
+      effort: "medium",
       maxConsecutiveFailures: 3,
+      observerEvery: 5,
       preventSleep: false,
     })),
   }));
@@ -628,6 +619,9 @@ async function runCliResumeWithActualRun(
     stopWhenContent?: string;
     commitMessageExists: boolean;
     commitMessageContent?: string;
+    workflowContent?: string;
+    ledgerPathContent?: string;
+    tempDir: string;
   };
 
   try {
@@ -658,6 +652,13 @@ async function runCliResumeWithActualRun(
       commitMessageContent: commitMessageExists
         ? readFileSync(commitMessagePath, "utf-8")
         : undefined,
+      workflowContent: existsSync(workflowPath)
+        ? readFileSync(workflowPath, "utf-8")
+        : undefined,
+      ledgerPathContent: existsSync(join(runDir, "ledger-path"))
+        ? readFileSync(join(runDir, "ledger-path"), "utf-8")
+        : undefined,
+      tempDir,
     };
   } finally {
     process.argv = originalArgv;
@@ -674,78 +675,99 @@ async function runCliResumeWithActualRun(
 }
 
 describe("cli", () => {
-  it("passes per-agent config through to agent creation", async () => {
+  it("passes claude config through to agent creation", async () => {
     const { createAgent } = await runCliWithMocks(["ship it"], {
-      agent: "codex",
-      agentPathOverride: {},
+      agentPathOverride: { claude: "/opt/bin/claude-wrapper" },
       agentModel: {},
       agentArgsOverride: {
-        codex: ["-m", "gpt-5.4", "--full-auto"],
+        claude: ["--add-dir", "../shared"],
       },
-      acpRegistryOverrides: {},
+      effort: "medium",
       maxConsecutiveFailures: 3,
+      observerEvery: 5,
       preventSleep: false,
     });
 
     expect(createAgent).toHaveBeenCalledWith(
-      "codex",
-      stubRunInfo,
-      undefined,
-      ["-m", "gpt-5.4", "--full-auto"],
-      { includeStopField: false, acpRegistryOverrides: {} },
+      "/opt/bin/claude-wrapper",
+      ["--add-dir", "../shared"],
+      { includeStopField: false, effort: "medium" },
     );
   });
 
   it("resolves the model from agentModel config and lets --model override it", async () => {
     const { createAgent } = await runCliWithMocks(["ship it"], {
-      agent: "codex",
       agentPathOverride: {},
-      agentModel: { codex: "gpt-5.4" },
+      agentModel: { claude: "sonnet" },
       agentArgsOverride: {},
-      acpRegistryOverrides: {},
+      effort: "medium",
       maxConsecutiveFailures: 3,
+      observerEvery: 5,
       preventSleep: false,
     });
 
-    expect(createAgent).toHaveBeenCalledWith(
-      "codex",
-      stubRunInfo,
-      undefined,
-      undefined,
-      { includeStopField: false, acpRegistryOverrides: {}, model: "gpt-5.4" },
+    expect(createAgent).toHaveBeenCalledWith(undefined, undefined, {
+      includeStopField: false,
+      effort: "medium",
+      model: "sonnet",
+    });
+
+    const flagResult = await runCliWithMocks(["--model", "opus", "ship it"], {
+      agentPathOverride: {},
+      agentModel: { claude: "sonnet" },
+      agentArgsOverride: {},
+      effort: "medium",
+      maxConsecutiveFailures: 3,
+      observerEvery: 5,
+      preventSleep: false,
+    });
+
+    expect(flagResult.createAgent).toHaveBeenCalledWith(undefined, undefined, {
+      includeStopField: false,
+      effort: "medium",
+      model: "opus",
+    });
+  });
+
+  it("passes the configured effort to agent creation and lets --effort override it", async () => {
+    const config = {
+      agentPathOverride: {},
+      agentModel: {},
+      agentArgsOverride: {},
+      effort: "low" as const,
+      maxConsecutiveFailures: 3,
+      observerEvery: 5,
+      preventSleep: false,
+    };
+
+    const { createAgent, appendDebugLog } = await runCliWithMocks(
+      ["ship it"],
+      config,
+    );
+    expect(createAgent.mock.calls[0]?.[2]).toMatchObject({ effort: "low" });
+    expect(appendDebugLog).toHaveBeenCalledWith(
+      "run:start",
+      expect.objectContaining({ effort: "low" }),
     );
 
     const flagResult = await runCliWithMocks(
-      ["--model", "gpt-5.5", "ship it"],
-      {
-        agent: "codex",
-        agentPathOverride: {},
-        agentModel: { codex: "gpt-5.4" },
-        agentArgsOverride: {},
-        acpRegistryOverrides: {},
-        maxConsecutiveFailures: 3,
-        preventSleep: false,
-      },
+      ["--effort", "xhigh", "ship it"],
+      config,
     );
-
-    expect(flagResult.createAgent).toHaveBeenCalledWith(
-      "codex",
-      stubRunInfo,
-      undefined,
-      undefined,
-      { includeStopField: false, acpRegistryOverrides: {}, model: "gpt-5.5" },
-    );
+    expect(flagResult.createAgent.mock.calls[0]?.[2]).toMatchObject({
+      effort: "xhigh",
+    });
   });
 
-  it("rejects --model for ACP targets", async () => {
+  it.each(["extreme", "", "HIGH"])("rejects --effort %j", async (effort) => {
     await expect(
-      runCliWithMocks(["--model", "gemini-2.5-pro", "ship it"], {
-        agent: "acp:gemini",
+      runCliWithMocks(["--effort", effort, "ship it"], {
         agentPathOverride: {},
         agentModel: {},
         agentArgsOverride: {},
-        acpRegistryOverrides: {},
+        effort: "medium",
         maxConsecutiveFailures: 3,
+        observerEvery: 5,
         preventSleep: false,
       }),
     ).rejects.toThrow("process.exit unexpectedly called with 1");
@@ -754,68 +776,27 @@ describe("cli", () => {
   it.each(["", "   "])("rejects blank --model values", async (model) => {
     await expect(
       runCliWithMocks(["--model", model, "ship it"], {
-        agent: "opencode",
         agentPathOverride: {},
-        agentModel: { opencode: "openai/gpt-5" },
+        agentModel: { claude: "sonnet" },
         agentArgsOverride: {},
-        acpRegistryOverrides: {},
+        effort: "medium",
         maxConsecutiveFailures: 3,
+        observerEvery: 5,
         preventSleep: false,
       }),
     ).rejects.toThrow("process.exit unexpectedly called with 1");
-  });
-
-  it.each([
-    ["opencode", "gpt-5"],
-    ["rovodev", "claude-sonnet-4-5"],
-  ] as const)(
-    "rejects unsupported --model for --agent %s",
-    async (agent, model) => {
-      await expect(
-        runCliWithMocks(["--model", model, "ship it"], {
-          agent,
-          agentPathOverride: {},
-          agentModel: {},
-          agentArgsOverride: {},
-          acpRegistryOverrides: {},
-          maxConsecutiveFailures: 3,
-          preventSleep: false,
-        }),
-      ).rejects.toThrow("process.exit unexpectedly called with 1");
-    },
-  );
-
-  it("buckets raw ACP command specs in telemetry", async () => {
-    const { telemetry } = await runCliWithMocks(["ship it"], {
-      agent: "acp:./bin/dev-acp --profile ci --token secret",
-      agentPathOverride: {},
-      agentModel: {},
-      agentArgsOverride: {},
-      acpRegistryOverrides: {},
-      maxConsecutiveFailures: 3,
-      preventSleep: false,
-    });
-
-    expect(telemetry.pageview).toHaveBeenCalledWith("/run", {
-      agent: "acp:custom",
-      mode: "new",
-    });
-    expect(telemetry.track).toHaveBeenCalledWith(
-      "run",
-      expect.objectContaining({ agent: "acp:custom" }),
-    );
   });
 
   it("prints a permanent exit summary after the run completes", async () => {
     const { stdoutWriteCalls } = await runCliWithMocks(
       ["refactor auth flow"],
       {
-        agent: "opencode",
         agentPathOverride: {},
         agentModel: {},
         agentArgsOverride: {},
-        acpRegistryOverrides: {},
+        effort: "medium",
         maxConsecutiveFailures: 3,
+        observerEvery: 5,
         preventSleep: false,
       },
       {
@@ -847,7 +828,7 @@ describe("cli", () => {
     const stdout = stdoutWriteCalls.map(([chunk]) => String(chunk)).join("");
     expect(stdout).toContain("gnhf wrapped");
     expect(stdout).toContain(
-      "opencode worked for 47m 12s on gnhf/refactor-auth-flow",
+      "claude worked for 47m 12s on gnhf/refactor-auth-flow",
     );
     expect(stdout).toContain("branch diff");
     expect(stdout).toContain("6 commits");
@@ -862,12 +843,12 @@ describe("cli", () => {
       await runCliWithMocks(
         ["ship it"],
         {
-          agent: "claude",
           agentPathOverride: {},
           agentModel: {},
           agentArgsOverride: {},
-          acpRegistryOverrides: {},
+          effort: "medium",
           maxConsecutiveFailures: 3,
+          observerEvery: 5,
           preventSleep: false,
         },
         { writeRunEndState },
@@ -889,112 +870,36 @@ describe("cli", () => {
     );
   });
 
-  it("redacts raw ACP command specs in the exit summary", async () => {
-    const rawAgent = "acp:./bin/dev-acp --profile ci --token secret";
-    const { stdoutWriteCalls } = await runCliWithMocks(
-      ["--agent", rawAgent, "ship it"],
-      {
-        agent: rawAgent,
-        agentPathOverride: {},
-        agentModel: {},
-        agentArgsOverride: {},
-        acpRegistryOverrides: {},
-        maxConsecutiveFailures: 3,
-        preventSleep: false,
-      },
-    );
-
-    const stdout = stdoutWriteCalls.map(([chunk]) => String(chunk)).join("");
-    expect(stdout).toContain("acp:custom worked");
-    expect(stdout).not.toContain("secret");
-    expect(stdout).not.toContain(rawAgent);
-  });
-
-  it("redacts raw ACP command specs in run start debug logs", async () => {
-    const rawAgent = "acp:./bin/dev-acp --profile ci --token secret";
-    const { appendDebugLog } = await runCliWithMocks(
-      ["--agent", rawAgent, "ship it"],
-      {
-        agent: rawAgent,
-        agentPathOverride: {},
-        agentModel: {},
-        agentArgsOverride: {},
-        acpRegistryOverrides: {},
-        maxConsecutiveFailures: 3,
-        preventSleep: false,
-      },
-    );
-
-    expect(appendDebugLog).toHaveBeenCalledWith(
-      "run:start",
-      expect.objectContaining({
-        agent: "acp:custom",
-        args: ["--agent", "acp:custom", "ship it"],
-      }),
-    );
-    expect(JSON.stringify(appendDebugLog.mock.calls)).not.toContain("secret");
-  });
-
-  it("redacts raw ACP command specs in equals-form agent args", async () => {
-    const rawAgent = "acp:./bin/dev-acp --profile ci --token secret";
-    const { appendDebugLog } = await runCliWithMocks(
-      [`--agent=${rawAgent}`, "ship it"],
-      {
-        agent: rawAgent,
-        agentPathOverride: {},
-        agentModel: {},
-        agentArgsOverride: {},
-        acpRegistryOverrides: {},
-        maxConsecutiveFailures: 3,
-        preventSleep: false,
-      },
-    );
-
-    expect(appendDebugLog).toHaveBeenCalledWith(
-      "run:start",
-      expect.objectContaining({
-        args: ["--agent=acp:custom", "ship it"],
-      }),
-    );
-    expect(JSON.stringify(appendDebugLog.mock.calls)).not.toContain("secret");
-  });
-
   it("threads includeStopField=true into agent creation when --stop-when is set", async () => {
     const { createAgent } = await runCliWithMocks(
       ["ship it", "--stop-when", "all tests pass"],
       {
-        agent: "codex",
         agentPathOverride: {},
         agentModel: {},
         agentArgsOverride: {},
-        acpRegistryOverrides: {},
+        effort: "medium",
         maxConsecutiveFailures: 3,
+        observerEvery: 5,
         preventSleep: false,
       },
     );
 
-    expect(createAgent).toHaveBeenCalledWith(
-      "codex",
-      stubRunInfo,
-      undefined,
-      undefined,
-      {
-        includeStopField: true,
-        stopWhen: "all tests pass",
-        acpRegistryOverrides: {},
-      },
-    );
+    expect(createAgent).toHaveBeenCalledWith(undefined, undefined, {
+      includeStopField: true,
+      effort: "medium",
+      stopWhen: "all tests pass",
+    });
   });
 
   it("threads commit message fields into run setup and agent creation", async () => {
     const { createAgent, setupRun } = await runCliWithMocks(["ship it"], {
-      agent: "codex",
       agentPathOverride: {},
       agentModel: {},
       agentArgsOverride: {},
-      acpRegistryOverrides: {},
       commitMessage: CONVENTIONAL_COMMIT_MESSAGE,
+      effort: "medium",
       maxConsecutiveFailures: 3,
+      observerEvery: 5,
       preventSleep: false,
     });
 
@@ -1026,26 +931,23 @@ describe("cli", () => {
       process.cwd(),
       expectedSchemaOptions,
     );
-    expect(createAgent).toHaveBeenCalledWith(
-      "codex",
-      stubRunInfo,
-      undefined,
-      undefined,
-      { ...expectedSchemaOptions, acpRegistryOverrides: {} },
-    );
+    expect(createAgent).toHaveBeenCalledWith(undefined, undefined, {
+      ...expectedSchemaOptions,
+      effort: "medium",
+    });
   });
 
   it("combines stop-when and commit message fields in schema options", async () => {
     const { createAgent, setupRun } = await runCliWithMocks(
       ["ship it", "--stop-when", "all checks pass"],
       {
-        agent: "codex",
         agentPathOverride: {},
         agentModel: {},
         agentArgsOverride: {},
-        acpRegistryOverrides: {},
         commitMessage: CONVENTIONAL_COMMIT_MESSAGE,
+        effort: "medium",
         maxConsecutiveFailures: 3,
+        observerEvery: 5,
         preventSleep: false,
       },
     );
@@ -1079,12 +981,286 @@ describe("cli", () => {
       process.cwd(),
       expectedSchemaOptions,
     );
-    expect(createAgent).toHaveBeenCalledWith(
-      "codex",
-      stubRunInfo,
+    expect(createAgent).toHaveBeenCalledWith(undefined, undefined, {
+      ...expectedSchemaOptions,
+      effort: "medium",
+    });
+  });
+
+  it.each(["foo", "", "RESEARCH"])(
+    "rejects --workflow %j before creating the agent",
+    async (workflow) => {
+      const createAgent = vi.fn(() => ({ name: "claude" }));
+      const consoleErrorSink: unknown[][] = [];
+      const stderrWrite = vi
+        .spyOn(process.stderr, "write")
+        .mockImplementation(() => true);
+      try {
+        await expect(
+          runCliWithMocks(
+            ["--workflow", workflow, "ship it"],
+            {
+              agentPathOverride: {},
+              agentModel: {},
+              agentArgsOverride: {},
+              effort: "medium",
+              maxConsecutiveFailures: 3,
+              observerEvery: 5,
+              preventSleep: false,
+            },
+            { createAgent, consoleErrorSink },
+          ),
+        ).rejects.toThrow("process.exit unexpectedly called with 1");
+        expect(
+          stderrWrite.mock.calls.map(([chunk]) => String(chunk)).join(""),
+        ).toContain("must be one of: default or research");
+      } finally {
+        stderrWrite.mockRestore();
+      }
+      expect(createAgent).not.toHaveBeenCalled();
+    },
+  );
+
+  it("threads --workflow research into run setup, agent creation and the run log", async () => {
+    const { appendDebugLog, createAgent, setupRun } = await runCliWithMocks(
+      ["ship it", "--workflow", "research"],
+      {
+        agentPathOverride: {},
+        agentModel: {},
+        agentArgsOverride: {},
+        effort: "medium",
+        maxConsecutiveFailures: 3,
+        observerEvery: 5,
+        preventSleep: false,
+      },
+      {
+        setupRun: vi.fn(() => ({ ...stubRunInfo, workflow: "research" })),
+      },
+    );
+
+    expect(setupRun).toHaveBeenCalledWith(
+      expect.stringMatching(/^ship-it-/),
+      "ship it",
+      "abc123",
+      process.cwd(),
+      { includeStopField: false, workflow: "research" },
+    );
+    expect(createAgent).toHaveBeenCalledWith(undefined, undefined, {
+      includeStopField: false,
+      workflow: "research",
+      effort: "medium",
+    });
+    expect(appendDebugLog).toHaveBeenCalledWith(
+      "run:start",
+      expect.objectContaining({ workflow: "research" }),
+    );
+  });
+
+  it("keeps schema options unchanged for --workflow default", async () => {
+    const { createAgent, setupRun } = await runCliWithMocks(
+      ["ship it", "--workflow", "default"],
+      {
+        agentPathOverride: {},
+        agentModel: {},
+        agentArgsOverride: {},
+        effort: "medium",
+        maxConsecutiveFailures: 3,
+        observerEvery: 5,
+        preventSleep: false,
+      },
+    );
+
+    expect(setupRun).toHaveBeenCalledWith(
+      expect.stringMatching(/^ship-it-/),
+      "ship it",
+      "abc123",
+      process.cwd(),
+      { includeStopField: false },
+    );
+    expect(createAgent).toHaveBeenCalledWith(undefined, undefined, {
+      includeStopField: false,
+      effort: "medium",
+    });
+  });
+
+  it.each([
+    [["--ledger", "l.jsonl", "ship it"]],
+    [["--ledger", "l.jsonl", "--workflow", "default", "ship it"]],
+  ])(
+    "rejects --ledger without --workflow research before setting up a run: %j",
+    async (args) => {
+      const createAgent = vi.fn(() => ({ name: "claude" }));
+      const setupRun = vi.fn(() => stubRunInfo);
+      const consoleErrorSink: unknown[][] = [];
+      await expect(
+        runCliWithMocks(
+          args,
+          {
+            agentPathOverride: {},
+            agentModel: {},
+            agentArgsOverride: {},
+            effort: "medium",
+            maxConsecutiveFailures: 3,
+            observerEvery: 5,
+            preventSleep: false,
+          },
+          { createAgent, setupRun, consoleErrorSink },
+        ),
+      ).rejects.toThrow("process.exit unexpectedly called with 1");
+      expect(
+        consoleErrorSink.map((call) => call.join(" ")).join("\n"),
+      ).toContain("--ledger requires --workflow research");
+      expect(setupRun).not.toHaveBeenCalled();
+      expect(createAgent).not.toHaveBeenCalled();
+    },
+  );
+
+  it("rejects an empty --ledger before creating the agent", async () => {
+    const createAgent = vi.fn(() => ({ name: "claude" }));
+    const stderrWrite = vi
+      .spyOn(process.stderr, "write")
+      .mockImplementation(() => true);
+    try {
+      await expect(
+        runCliWithMocks(
+          ["--workflow", "research", "--ledger", " ", "ship it"],
+          {
+            agentPathOverride: {},
+            agentModel: {},
+            agentArgsOverride: {},
+            effort: "medium",
+            maxConsecutiveFailures: 3,
+            observerEvery: 5,
+            preventSleep: false,
+          },
+          { createAgent },
+        ),
+      ).rejects.toThrow("process.exit unexpectedly called with 1");
+      expect(
+        stderrWrite.mock.calls.map(([chunk]) => String(chunk)).join(""),
+      ).toContain("must not be empty");
+    } finally {
+      stderrWrite.mockRestore();
+    }
+    expect(createAgent).not.toHaveBeenCalled();
+  });
+
+  it("threads --ledger into run setup but not into agent creation", async () => {
+    const { createAgent, setupRun, appendDebugLog } = await runCliWithMocks(
+      ["ship it", "--workflow", "research", "--ledger", "research/l.jsonl"],
+      {
+        agentPathOverride: {},
+        agentModel: {},
+        agentArgsOverride: {},
+        effort: "medium",
+        maxConsecutiveFailures: 3,
+        observerEvery: 5,
+        preventSleep: false,
+      },
+      {
+        setupRun: vi.fn(() => ({
+          ...stubRunInfo,
+          workflow: "research",
+          ledgerPath: "/repo/research/l.jsonl",
+        })),
+      },
+    );
+
+    expect(setupRun).toHaveBeenCalledWith(
+      expect.stringMatching(/^ship-it-/),
+      "ship it",
+      "abc123",
+      process.cwd(),
+      {
+        includeStopField: false,
+        workflow: "research",
+        ledger: "research/l.jsonl",
+      },
+    );
+    expect(createAgent).toHaveBeenCalledWith(undefined, undefined, {
+      includeStopField: false,
+      workflow: "research",
+      effort: "medium",
+    });
+    expect(appendDebugLog).toHaveBeenCalledWith(
+      "run:start",
+      expect.objectContaining({ ledgerPath: "/repo/research/l.jsonl" }),
+    );
+  });
+
+  it("keeps the stored ledger path when resuming a gnhf branch without --ledger", async () => {
+    const { orchestratorCtor, ledgerPathContent, tempDir } =
+      await runCliResumeWithActualRun([], undefined, {
+        storedWorkflow: "research",
+        storedLedgerPath: "research/l.jsonl",
+      });
+
+    expect(ledgerPathContent).toBe("research/l.jsonl\n");
+    const runInfoArg = orchestratorCtor.mock.calls[0]![2] as {
+      ledgerPath?: string;
+    };
+    expect(runInfoArg.ledgerPath).toBe(join(tempDir, "research", "l.jsonl"));
+  });
+
+  it("replaces the stored ledger path when resuming a gnhf branch with --ledger", async () => {
+    const { orchestratorCtor, ledgerPathContent, tempDir } =
+      await runCliResumeWithActualRun(
+        ["--workflow", "research", "--ledger", "new.jsonl"],
+        undefined,
+        { storedWorkflow: "research", storedLedgerPath: "old.jsonl" },
+      );
+
+    expect(ledgerPathContent).toBe("new.jsonl\n");
+    const runInfoArg = orchestratorCtor.mock.calls[0]![2] as {
+      ledgerPath?: string;
+    };
+    expect(runInfoArg.ledgerPath).toBe(join(tempDir, "new.jsonl"));
+  });
+
+  it("keeps the stored research workflow when resuming a gnhf branch without --workflow", async () => {
+    const { appendDebugLog, createAgent, schema, workflowContent } =
+      await runCliResumeWithActualRun([], undefined, {
+        storedWorkflow: "research",
+      });
+
+    expect(workflowContent).toBe("research\n");
+    expect(createAgent).toHaveBeenCalledWith(undefined, undefined, {
+      includeStopField: false,
+      workflow: "research",
+      effort: "medium",
+    });
+    expect(schema.required).toEqual(
+      expect.arrayContaining(["evidence_origin", "boundary"]),
+    );
+    expect(appendDebugLog).toHaveBeenCalledWith(
+      "run:start",
+      expect.objectContaining({ workflow: "research" }),
+    );
+  });
+
+  it("overrides the stored workflow when resuming a gnhf branch with --workflow", async () => {
+    const { createAgent, schema, workflowContent } =
+      await runCliResumeWithActualRun(["--workflow", "default"], undefined, {
+        storedWorkflow: "research",
+      });
+
+    expect(workflowContent).toBe("default\n");
+    expect(createAgent).toHaveBeenCalledWith(undefined, undefined, {
+      includeStopField: false,
+      effort: "medium",
+    });
+    expect(
+      (schema.properties as Record<string, unknown>).evidence_origin,
+    ).toBeUndefined();
+
+    const upgraded = await runCliResumeWithActualRun(
+      ["--workflow", "research"],
       undefined,
-      undefined,
-      { ...expectedSchemaOptions, acpRegistryOverrides: {} },
+      { storedWorkflow: "default" },
+    );
+    expect(upgraded.workflowContent).toBe("research\n");
+    expect(upgraded.schema.required).toEqual(
+      expect.arrayContaining(["evidence_origin"]),
     );
   });
 
@@ -1092,17 +1268,14 @@ describe("cli", () => {
     const { appendDebugLog, createAgent, orchestratorCtor, schema } =
       await runCliResumeWithActualRun([], "all tests pass");
 
-    expect(createAgent).toHaveBeenCalledWith(
-      "claude",
+    expect(orchestratorCtor.mock.calls[0]?.[2]).toEqual(
       expect.objectContaining({ stopWhen: "all tests pass" }),
-      undefined,
-      undefined,
-      {
-        includeStopField: true,
-        stopWhen: "all tests pass",
-        acpRegistryOverrides: {},
-      },
     );
+    expect(createAgent).toHaveBeenCalledWith(undefined, undefined, {
+      includeStopField: true,
+      effort: "medium",
+      stopWhen: "all tests pass",
+    });
     expect(orchestratorCtor.mock.calls[0]?.[6]).toMatchObject({
       stopWhen: "all tests pass",
     });
@@ -1144,6 +1317,8 @@ describe("cli", () => {
       maxIterations: undefined,
       maxTokens: undefined,
       completedIterations: 0,
+      successCount: 0,
+      failCount: 0,
       stopWhen: undefined,
     });
     expect(
@@ -1157,17 +1332,19 @@ describe("cli", () => {
       await runCliResumeWithActualRun([]);
 
     expect(stopWhenExists).toBe(false);
-    expect(createAgent).toHaveBeenCalledWith(
-      "claude",
+    expect(orchestratorCtor.mock.calls[0]?.[2]).toEqual(
       expect.objectContaining({ stopWhen: undefined }),
-      undefined,
-      undefined,
-      { includeStopField: false, acpRegistryOverrides: {} },
     );
+    expect(createAgent).toHaveBeenCalledWith(undefined, undefined, {
+      includeStopField: false,
+      effort: "medium",
+    });
     expect(orchestratorCtor.mock.calls[0]?.[6]).toEqual({
       maxIterations: undefined,
       maxTokens: undefined,
       completedIterations: 0,
+      successCount: 0,
+      failCount: 0,
       stopWhen: undefined,
     });
     expect(
@@ -1182,13 +1359,13 @@ describe("cli", () => {
         storedCommitMessage: "default",
       });
 
-    expect(createAgent).toHaveBeenCalledWith(
-      "claude",
+    expect(orchestratorCtor.mock.calls[0]?.[2]).toEqual(
       expect.objectContaining({ commitMessage: undefined }),
-      undefined,
-      undefined,
-      { includeStopField: false, acpRegistryOverrides: {} },
     );
+    expect(createAgent).toHaveBeenCalledWith(undefined, undefined, {
+      includeStopField: false,
+      effort: "medium",
+    });
     expect(orchestratorCtor.mock.calls[0]?.[0]).toMatchObject({
       commitMessage: undefined,
     });
@@ -1204,13 +1381,15 @@ describe("cli", () => {
         storedCommitMessage: "conventional",
       });
 
-    expect(createAgent).toHaveBeenCalledWith(
-      "claude",
+    expect(orchestratorCtor.mock.calls[0]?.[2]).toEqual(
       expect.objectContaining({ commitMessage: CONVENTIONAL_COMMIT_MESSAGE }),
+    );
+    expect(createAgent).toHaveBeenCalledWith(
       undefined,
       undefined,
       expect.objectContaining({
         includeStopField: false,
+        effort: "medium",
         commitFields: expect.arrayContaining([
           expect.objectContaining({ name: "type" }),
           expect.objectContaining({ name: "scope" }),
@@ -1236,12 +1415,12 @@ describe("cli", () => {
         "90m",
       ],
       {
-        agent: "claude",
         agentPathOverride: {},
         agentModel: {},
         agentArgsOverride: {},
-        acpRegistryOverrides: {},
+        effort: "medium",
         maxConsecutiveFailures: 3,
+        observerEvery: 5,
         preventSleep: false,
       },
     );
@@ -1251,6 +1430,8 @@ describe("cli", () => {
       maxIterations: 12,
       maxTokens: 3456,
       completedIterations: 0,
+      successCount: 0,
+      failCount: 0,
       maxRateLimitWaitMs: 90 * 60_000,
     });
   });
@@ -1259,12 +1440,12 @@ describe("cli", () => {
     const { orchestratorCtor } = await runCliWithMocks(
       ["ship it", "--fallback-model", "claude-haiku"],
       {
-        agent: "claude",
         agentPathOverride: {},
         agentModel: {},
         agentArgsOverride: {},
-        acpRegistryOverrides: {},
+        effort: "medium",
         maxConsecutiveFailures: 3,
+        observerEvery: 5,
         preventSleep: false,
       },
     );
@@ -1273,6 +1454,8 @@ describe("cli", () => {
       maxIterations: undefined,
       maxTokens: undefined,
       completedIterations: 0,
+      successCount: 0,
+      failCount: 0,
       stopWhen: undefined,
       fallbackModel: "claude-haiku",
     });
@@ -1280,12 +1463,12 @@ describe("cli", () => {
 
   it("passes push mode to the orchestrator when --push is set", async () => {
     const { orchestratorCtor } = await runCliWithMocks(["ship it", "--push"], {
-      agent: "claude",
       agentPathOverride: {},
       agentModel: {},
       agentArgsOverride: {},
-      acpRegistryOverrides: {},
+      effort: "medium",
       maxConsecutiveFailures: 3,
+      observerEvery: 5,
       preventSleep: false,
     });
 
@@ -1294,6 +1477,8 @@ describe("cli", () => {
       maxIterations: undefined,
       maxTokens: undefined,
       completedIterations: 0,
+      successCount: 0,
+      failCount: 0,
       stopWhen: undefined,
       push: true,
     });
@@ -1303,12 +1488,12 @@ describe("cli", () => {
     const { rendererCtor } = await runCliWithMocks(
       ["ship it", "--meteor-frequency", "3"],
       {
-        agent: "claude",
         agentPathOverride: {},
         agentModel: {},
         agentArgsOverride: {},
-        acpRegistryOverrides: {},
+        effort: "medium",
         maxConsecutiveFailures: 3,
+        observerEvery: 5,
         preventSleep: false,
       },
     );
@@ -1319,12 +1504,12 @@ describe("cli", () => {
 
   it("defaults meteor frequency to 3", async () => {
     const { rendererCtor } = await runCliWithMocks(["ship it"], {
-      agent: "claude",
       agentPathOverride: {},
       agentModel: {},
       agentArgsOverride: {},
-      acpRegistryOverrides: {},
+      effort: "medium",
       maxConsecutiveFailures: 3,
+      observerEvery: 5,
       preventSleep: false,
     });
 
@@ -1332,20 +1517,20 @@ describe("cli", () => {
     expect(rendererCtor.mock.calls[0]?.[4]).toEqual({ meteorFrequency: 3 });
   });
 
-  it("uses codex as the mock mode agent label", async () => {
+  it("uses claude as the mock mode agent label", async () => {
     const { loadConfig, rendererCtor } = await runCliWithMocks(["--mock"], {
-      agent: "claude",
       agentPathOverride: {},
       agentModel: {},
       agentArgsOverride: {},
-      acpRegistryOverrides: {},
+      effort: "medium",
       maxConsecutiveFailures: 3,
+      observerEvery: 5,
       preventSleep: false,
     });
 
     expect(loadConfig).not.toHaveBeenCalled();
     expect(rendererCtor).toHaveBeenCalledTimes(1);
-    expect(rendererCtor.mock.calls[0]?.[2]).toBe("codex");
+    expect(rendererCtor.mock.calls[0]?.[2]).toBe("claude");
     expect(rendererCtor.mock.calls[0]?.[4]).toEqual({ meteorFrequency: 3 });
   });
 
@@ -1354,12 +1539,12 @@ describe("cli", () => {
     const { setupRun, orchestratorCtor } = await runCliWithMocks(
       ["ship it", "--current-branch"],
       {
-        agent: "claude",
         agentPathOverride: {},
         agentModel: {},
         agentArgsOverride: {},
-        acpRegistryOverrides: {},
+        effort: "medium",
         maxConsecutiveFailures: 3,
+        observerEvery: 5,
         preventSleep: false,
       },
       { createBranch },
@@ -1385,7 +1570,11 @@ describe("cli", () => {
       runId,
     }));
     const getLastIterationNumber = vi.fn(() => 2);
-    const getCompletedIterationCount = vi.fn(() => 1);
+    const getFinishedIterationCounts = vi.fn(() => ({
+      completed: 3,
+      successCount: 2,
+      failCount: 1,
+    }));
 
     mkdirSync(join(tempDir, ".gnhf", "runs", runId), {
       recursive: true,
@@ -1397,15 +1586,15 @@ describe("cli", () => {
       const { setupRun, orchestratorCtor } = await runCliWithMocks(
         ["ship it", "--current-branch"],
         {
-          agent: "claude",
           agentPathOverride: {},
           agentModel: {},
           agentArgsOverride: {},
-          acpRegistryOverrides: {},
+          effort: "medium",
           maxConsecutiveFailures: 3,
+          observerEvery: 5,
           preventSleep: false,
         },
-        { resumeRun, getLastIterationNumber, getCompletedIterationCount },
+        { resumeRun, getLastIterationNumber, getFinishedIterationCounts },
       );
 
       expect(resumeRun).toHaveBeenCalledWith(runId, effectiveTempDir, {
@@ -1419,12 +1608,78 @@ describe("cli", () => {
         expect.objectContaining({ runId }),
       );
       expect(orchestratorCtor.mock.calls[0]?.[5]).toBe(2);
-      expect(getCompletedIterationCount).toHaveBeenCalledWith(
+      expect(getFinishedIterationCounts).toHaveBeenCalledWith(
         expect.objectContaining({ runId }),
       );
       expect(orchestratorCtor.mock.calls[0]?.[6]).toEqual(
-        expect.objectContaining({ completedIterations: 1 }),
+        expect.objectContaining({
+          completedIterations: 3,
+          successCount: 2,
+          failCount: 1,
+        }),
       );
+    } finally {
+      process.chdir(originalCwd);
+      rmSync(tempDir, { recursive: true, force: true });
+    }
+  });
+
+  it("carries the workflow through a --current-branch resume", async () => {
+    const originalCwd = process.cwd();
+    const tempDir = mkdtempSync(join(tmpdir(), "gnhf-cli-current-resume-"));
+    const runId = `ship-it-${createHash("sha256").update("ship it").digest("hex").slice(0, 6)}`;
+    const resumeRun = vi.fn(() => ({
+      ...stubRunInfo,
+      runId,
+      workflow: "research" as const,
+    }));
+
+    mkdirSync(join(tempDir, ".gnhf", "runs", runId), {
+      recursive: true,
+    });
+    process.chdir(tempDir);
+
+    try {
+      const effectiveTempDir = process.cwd();
+      const stored = await runCliWithMocks(
+        ["ship it", "--current-branch"],
+        {
+          agentPathOverride: {},
+          agentModel: {},
+          agentArgsOverride: {},
+          effort: "medium",
+          maxConsecutiveFailures: 3,
+          observerEvery: 5,
+          preventSleep: false,
+        },
+        { resumeRun },
+      );
+      expect(resumeRun).toHaveBeenLastCalledWith(runId, effectiveTempDir, {
+        includeStopField: false,
+      });
+      expect(stored.createAgent.mock.calls[0]?.[2]).toEqual({
+        includeStopField: false,
+        workflow: "research",
+        effort: "medium",
+      });
+
+      await runCliWithMocks(
+        ["ship it", "--current-branch", "--workflow", "research"],
+        {
+          agentPathOverride: {},
+          agentModel: {},
+          agentArgsOverride: {},
+          effort: "medium",
+          maxConsecutiveFailures: 3,
+          observerEvery: 5,
+          preventSleep: false,
+        },
+        { resumeRun },
+      );
+      expect(resumeRun).toHaveBeenLastCalledWith(runId, effectiveTempDir, {
+        includeStopField: false,
+        workflow: "research",
+      });
     } finally {
       process.chdir(originalCwd);
       rmSync(tempDir, { recursive: true, force: true });
@@ -1451,12 +1706,12 @@ describe("cli", () => {
       await runCliWithMocks(
         ["ship it", "--current-branch"],
         {
-          agent: "claude",
           agentPathOverride: {},
           agentModel: {},
           agentArgsOverride: {},
-          acpRegistryOverrides: {},
+          effort: "medium",
           maxConsecutiveFailures: 3,
+          observerEvery: 5,
           preventSleep: false,
         },
         { ensureCleanWorkingTree, resumeRun },
@@ -1475,12 +1730,12 @@ describe("cli", () => {
   it("rejects combining --current-branch and --worktree", async () => {
     await expect(
       runCliWithMocks(["ship it", "--current-branch", "--worktree"], {
-        agent: "claude",
         agentPathOverride: {},
         agentModel: {},
         agentArgsOverride: {},
-        acpRegistryOverrides: {},
+        effort: "medium",
         maxConsecutiveFailures: 3,
+        observerEvery: 5,
         preventSleep: false,
       }),
     ).rejects.toThrow("process.exit unexpectedly called with 1");
@@ -1489,25 +1744,25 @@ describe("cli", () => {
   it("treats --prevent-sleep as a runtime override without passing it to config bootstrap", async () => {
     const { loadConfig, orchestratorCtor, startSleepPrevention } =
       await runCliWithMocks(["ship it", "--prevent-sleep", "off"], {
-        agent: "claude",
         agentPathOverride: {},
         agentModel: {},
         agentArgsOverride: {},
-        acpRegistryOverrides: {},
+        effort: "medium",
         maxConsecutiveFailures: 3,
+        observerEvery: 5,
         preventSleep: false,
       });
 
-    expect(loadConfig).toHaveBeenCalledWith({});
+    expect(loadConfig).toHaveBeenCalledWith();
     expect(startSleepPrevention).not.toHaveBeenCalled();
     expect(orchestratorCtor).toHaveBeenCalledTimes(1);
     expect(orchestratorCtor.mock.calls[0]?.[0]).toEqual({
-      agent: "claude",
       agentPathOverride: {},
       agentModel: {},
       agentArgsOverride: {},
-      acpRegistryOverrides: {},
+      effort: "medium",
       maxConsecutiveFailures: 3,
+      observerEvery: 5,
       preventSleep: false,
     });
   });
@@ -1524,12 +1779,12 @@ describe("cli", () => {
     const { stdoutWriteCalls } = await runCliWithMocks(
       ["ship it"],
       {
-        agent: "claude",
         agentPathOverride: {},
         agentModel: {},
         agentArgsOverride: {},
-        acpRegistryOverrides: {},
+        effort: "medium",
         maxConsecutiveFailures: 3,
+        observerEvery: 5,
         preventSleep: true,
       },
       { startSleepPrevention },
@@ -1551,12 +1806,12 @@ describe("cli", () => {
     const { stdoutWriteCalls, orchestratorCtor } = await runCliWithMocks(
       ["ship it"],
       {
-        agent: "claude",
         agentPathOverride: {},
         agentModel: {},
         agentArgsOverride: {},
-        acpRegistryOverrides: {},
+        effort: "medium",
         maxConsecutiveFailures: 3,
+        observerEvery: 5,
         preventSleep: true,
       },
       { startSleepPrevention },
@@ -1586,12 +1841,12 @@ describe("cli", () => {
     const { consoleErrorCalls, stdoutWriteCalls } = await runCliWithMocks(
       ["ship it"],
       {
-        agent: "claude",
         agentPathOverride: {},
         agentModel: {},
         agentArgsOverride: {},
-        acpRegistryOverrides: {},
+        effort: "medium",
         maxConsecutiveFailures: 3,
+        observerEvery: 5,
         preventSleep: true,
       },
       { startSleepPrevention },
@@ -1613,12 +1868,12 @@ describe("cli", () => {
       runCliWithMocks(
         ["ship it"],
         {
-          agent: "claude",
           agentPathOverride: {},
           agentModel: {},
           agentArgsOverride: {},
-          acpRegistryOverrides: {},
+          effort: "medium",
           maxConsecutiveFailures: 3,
+          observerEvery: 5,
           preventSleep: true,
         },
         { appendDebugLog, startSleepPrevention },
@@ -1648,12 +1903,12 @@ describe("cli", () => {
     await runCliWithMocks(
       [],
       {
-        agent: "claude",
         agentPathOverride: {},
         agentModel: {},
         agentArgsOverride: {},
-        acpRegistryOverrides: {},
+        effort: "medium",
         maxConsecutiveFailures: 3,
+        observerEvery: 5,
         preventSleep: true,
       },
       {
@@ -1685,12 +1940,12 @@ describe("cli", () => {
       const { orchestratorCtor } = await runCliWithMocks(
         [],
         {
-          agent: "claude",
           agentPathOverride: {},
           agentModel: {},
           agentArgsOverride: {},
-          acpRegistryOverrides: {},
+          effort: "medium",
           maxConsecutiveFailures: 3,
+          observerEvery: 5,
           preventSleep: true,
         },
         {
@@ -1727,12 +1982,12 @@ describe("cli", () => {
     const { orchestratorCtor } = await runCliWithMocks(
       [],
       {
-        agent: "claude",
         agentPathOverride: {},
         agentModel: {},
         agentArgsOverride: {},
-        acpRegistryOverrides: {},
+        effort: "medium",
         maxConsecutiveFailures: 3,
+        observerEvery: 5,
         preventSleep: true,
       },
       {
@@ -1771,12 +2026,12 @@ describe("cli", () => {
       await runCliWithMocks(
         [],
         {
-          agent: "claude",
           agentPathOverride: {},
           agentModel: {},
           agentArgsOverride: {},
-          acpRegistryOverrides: {},
+          effort: "medium",
           maxConsecutiveFailures: 3,
+          observerEvery: 5,
           preventSleep: true,
         },
         {
@@ -1809,12 +2064,12 @@ describe("cli", () => {
       const { orchestratorCtor } = await runCliWithMocks(
         [],
         {
-          agent: "claude",
           agentPathOverride: {},
           agentModel: {},
           agentArgsOverride: {},
-          acpRegistryOverrides: {},
+          effort: "medium",
           maxConsecutiveFailures: 3,
+          observerEvery: 5,
           preventSleep: true,
         },
         {
@@ -1842,12 +2097,12 @@ describe("cli", () => {
 
   it("signals Linux sleep-prevention re-exec readiness before loading config", async () => {
     const loadConfig = vi.fn(() => ({
-      agent: "claude" as const,
       agentPathOverride: {},
       agentModel: {},
       agentArgsOverride: {},
-      acpRegistryOverrides: {},
+      effort: "medium",
       maxConsecutiveFailures: 3,
+      observerEvery: 5,
       preventSleep: true,
     }));
     const startSleepPrevention = vi.fn(() =>
@@ -1859,9 +2114,6 @@ describe("cli", () => {
 
     vi.resetModules();
     vi.doMock("./core/config.js", () => ({
-      AGENT_NAMES: TEST_AGENT_NAMES,
-      isAgentSpec: TEST_IS_AGENT_SPEC,
-      redactAgentSpecForLogs: TEST_REDACT_AGENT_SPEC,
       loadConfig,
     }));
     vi.doMock("./core/debug-log.js", () => ({
@@ -1874,6 +2126,7 @@ describe("cli", () => {
       ),
     }));
     vi.doMock("./core/git.js", () => ({
+      commitAll: vi.fn(),
       ensureCleanWorkingTree: vi.fn(),
       createBranch: vi.fn(),
       getHeadCommit: vi.fn(() => "abc123"),
@@ -1884,7 +2137,9 @@ describe("cli", () => {
       peekRunMetadata: vi.fn(() => stubRunInfo),
       resumeRun: vi.fn(),
       getLastIterationNumber: vi.fn(() => 0),
-      getCompletedIterationCount: vi.fn(() => 0),
+      getFinishedIterationCounts: vi.fn(() => NO_FINISHED_ITERATIONS),
+      getInterruptedIteration: vi.fn(() => null),
+      appendNotes: vi.fn(),
       writeRunEndState: vi.fn(),
     }));
     vi.doMock("./core/stdin.js", () => ({
@@ -2012,20 +2267,18 @@ describe("cli", () => {
     });
     vi.doMock("node:readline", () => ({ createInterface }));
     vi.doMock("./core/config.js", () => ({
-      AGENT_NAMES: TEST_AGENT_NAMES,
-      isAgentSpec: TEST_IS_AGENT_SPEC,
-      redactAgentSpecForLogs: TEST_REDACT_AGENT_SPEC,
       loadConfig: vi.fn(() => ({
-        agent: "claude",
         agentPathOverride: {},
         agentModel: {},
         agentArgsOverride: {},
-        acpRegistryOverrides: {},
+        effort: "medium",
         maxConsecutiveFailures: 3,
+        observerEvery: 5,
         preventSleep: true,
       })),
     }));
     vi.doMock("./core/git.js", () => ({
+      commitAll: vi.fn(),
       ensureCleanWorkingTree: vi.fn(),
       createBranch: vi.fn(),
       getHeadCommit: vi.fn(() => "abc123"),
@@ -2044,7 +2297,9 @@ describe("cli", () => {
         promptPath,
       })),
       getLastIterationNumber: vi.fn(() => 3),
-      getCompletedIterationCount: vi.fn(() => 0),
+      getFinishedIterationCounts: vi.fn(() => NO_FINISHED_ITERATIONS),
+      getInterruptedIteration: vi.fn(() => null),
+      appendNotes: vi.fn(),
       writeRunEndState: vi.fn(),
     }));
     vi.doMock("./core/agents/factory.js", () => ({
@@ -2152,20 +2407,18 @@ describe("cli", () => {
       };
     });
     vi.doMock("./core/config.js", () => ({
-      AGENT_NAMES: TEST_AGENT_NAMES,
-      isAgentSpec: TEST_IS_AGENT_SPEC,
-      redactAgentSpecForLogs: TEST_REDACT_AGENT_SPEC,
       loadConfig: vi.fn(() => ({
-        agent: "claude",
         agentPathOverride: {},
         agentModel: {},
         agentArgsOverride: {},
-        acpRegistryOverrides: {},
+        effort: "medium",
         maxConsecutiveFailures: 3,
+        observerEvery: 5,
         preventSleep: true,
       })),
     }));
     vi.doMock("./core/git.js", () => ({
+      commitAll: vi.fn(),
       ensureCleanWorkingTree: vi.fn(),
       createBranch: vi.fn(),
       getHeadCommit: vi.fn(() => "abc123"),
@@ -2184,7 +2437,9 @@ describe("cli", () => {
         promptPath,
       })),
       getLastIterationNumber: vi.fn(() => 3),
-      getCompletedIterationCount: vi.fn(() => 0),
+      getFinishedIterationCounts: vi.fn(() => NO_FINISHED_ITERATIONS),
+      getInterruptedIteration: vi.fn(() => null),
+      appendNotes: vi.fn(),
       writeRunEndState: vi.fn(),
     }));
     vi.doMock("./core/agents/factory.js", () => ({
@@ -2288,20 +2543,18 @@ describe("cli", () => {
       createInterface: vi.fn(() => readlineInterface),
     }));
     vi.doMock("./core/config.js", () => ({
-      AGENT_NAMES: TEST_AGENT_NAMES,
-      isAgentSpec: TEST_IS_AGENT_SPEC,
-      redactAgentSpecForLogs: TEST_REDACT_AGENT_SPEC,
       loadConfig: vi.fn(() => ({
-        agent: "claude",
         agentPathOverride: {},
         agentModel: {},
         agentArgsOverride: {},
-        acpRegistryOverrides: {},
+        effort: "medium",
         maxConsecutiveFailures: 3,
+        observerEvery: 5,
         preventSleep: true,
       })),
     }));
     vi.doMock("./core/git.js", () => ({
+      commitAll: vi.fn(),
       ensureCleanWorkingTree: vi.fn(),
       createBranch: vi.fn(),
       getHeadCommit: vi.fn(() => "abc123"),
@@ -2320,7 +2573,9 @@ describe("cli", () => {
         promptPath,
       })),
       getLastIterationNumber: vi.fn(() => 3),
-      getCompletedIterationCount: vi.fn(() => 0),
+      getFinishedIterationCounts: vi.fn(() => NO_FINISHED_ITERATIONS),
+      getInterruptedIteration: vi.fn(() => null),
+      appendNotes: vi.fn(),
       writeRunEndState: vi.fn(),
     }));
     vi.doMock("./core/agents/factory.js", () => ({
@@ -2419,20 +2674,18 @@ describe("cli", () => {
       createInterface: vi.fn(() => readlineInterface),
     }));
     vi.doMock("./core/config.js", () => ({
-      AGENT_NAMES: TEST_AGENT_NAMES,
-      isAgentSpec: TEST_IS_AGENT_SPEC,
-      redactAgentSpecForLogs: TEST_REDACT_AGENT_SPEC,
       loadConfig: vi.fn(() => ({
-        agent: "claude",
         agentPathOverride: {},
         agentModel: {},
         agentArgsOverride: {},
-        acpRegistryOverrides: {},
+        effort: "medium",
         maxConsecutiveFailures: 3,
+        observerEvery: 5,
         preventSleep: true,
       })),
     }));
     vi.doMock("./core/git.js", () => ({
+      commitAll: vi.fn(),
       ensureCleanWorkingTree: vi.fn(),
       createBranch: vi.fn(),
       getHeadCommit: vi.fn(() => "abc123"),
@@ -2451,7 +2704,9 @@ describe("cli", () => {
         promptPath,
       })),
       getLastIterationNumber: vi.fn(() => 3),
-      getCompletedIterationCount: vi.fn(() => 0),
+      getFinishedIterationCounts: vi.fn(() => NO_FINISHED_ITERATIONS),
+      getInterruptedIteration: vi.fn(() => null),
+      appendNotes: vi.fn(),
       writeRunEndState: vi.fn(),
     }));
     vi.doMock("./core/agents/factory.js", () => ({
@@ -2547,20 +2802,18 @@ describe("cli", () => {
       })),
     }));
     vi.doMock("./core/config.js", () => ({
-      AGENT_NAMES: TEST_AGENT_NAMES,
-      isAgentSpec: TEST_IS_AGENT_SPEC,
-      redactAgentSpecForLogs: TEST_REDACT_AGENT_SPEC,
       loadConfig: vi.fn(() => ({
-        agent: "claude",
         agentPathOverride: {},
         agentModel: {},
         agentArgsOverride: {},
-        acpRegistryOverrides: {},
+        effort: "medium",
         maxConsecutiveFailures: 3,
+        observerEvery: 5,
         preventSleep: true,
       })),
     }));
     vi.doMock("./core/git.js", () => ({
+      commitAll: vi.fn(),
       ensureCleanWorkingTree: vi.fn(),
       createBranch: vi.fn(),
       getHeadCommit: vi.fn(() => "abc123"),
@@ -2579,7 +2832,9 @@ describe("cli", () => {
         promptPath,
       })),
       getLastIterationNumber: vi.fn(() => 3),
-      getCompletedIterationCount: vi.fn(() => 0),
+      getFinishedIterationCounts: vi.fn(() => NO_FINISHED_ITERATIONS),
+      getInterruptedIteration: vi.fn(() => null),
+      appendNotes: vi.fn(),
       writeRunEndState: vi.fn(),
     }));
     vi.doMock("./core/agents/factory.js", () => ({
@@ -2648,6 +2903,8 @@ describe("cli", () => {
       runId: "existing-run",
       promptPath,
     }));
+    const commitAll = vi.fn();
+    const ensureCleanWorkingTree = vi.fn();
     const resumeRun = vi.fn(() => ({
       ...stubRunInfo,
       runId: "existing-run",
@@ -2668,16 +2925,13 @@ describe("cli", () => {
       })),
     }));
     vi.doMock("./core/config.js", () => ({
-      AGENT_NAMES: TEST_AGENT_NAMES,
-      isAgentSpec: TEST_IS_AGENT_SPEC,
-      redactAgentSpecForLogs: TEST_REDACT_AGENT_SPEC,
       loadConfig: vi.fn(() => ({
-        agent: "claude",
         agentPathOverride: {},
         agentModel: {},
         agentArgsOverride: {},
-        acpRegistryOverrides: {},
+        effort: "medium",
         maxConsecutiveFailures: 3,
+        observerEvery: 5,
         preventSleep: false,
       })),
     }));
@@ -2687,7 +2941,8 @@ describe("cli", () => {
       serializeError: vi.fn(),
     }));
     vi.doMock("./core/git.js", () => ({
-      ensureCleanWorkingTree: vi.fn(),
+      commitAll,
+      ensureCleanWorkingTree,
       createBranch: vi.fn(),
       getHeadCommit: vi.fn(() => "abc123"),
       getCurrentBranch: vi.fn(() => "gnhf/existing-run"),
@@ -2700,7 +2955,9 @@ describe("cli", () => {
       peekRunMetadata,
       resumeRun,
       getLastIterationNumber: vi.fn(() => 3),
-      getCompletedIterationCount: vi.fn(() => 0),
+      getFinishedIterationCounts: vi.fn(() => NO_FINISHED_ITERATIONS),
+      getInterruptedIteration: vi.fn(() => 2),
+      appendNotes: vi.fn(),
       writeRunEndState: vi.fn(),
     }));
     vi.doMock("./core/agents/factory.js", () => ({
@@ -2759,6 +3016,17 @@ describe("cli", () => {
         process.cwd(),
       );
       expect(resumeRun).toHaveBeenCalledTimes(1);
+      expect(commitAll).toHaveBeenCalledWith(
+        "gnhf 2: wip from interrupted iteration, recovered on resume",
+        process.cwd(),
+        { verify: false },
+      );
+      expect(commitAll.mock.invocationCallOrder[0]!).toBeLessThan(
+        ensureCleanWorkingTree.mock.invocationCallOrder[0]!,
+      );
+      expect(ensureCleanWorkingTree.mock.invocationCallOrder[0]!).toBeLessThan(
+        resumeRun.mock.invocationCallOrder[0]!,
+      );
       expect(resumeRun).toHaveBeenCalledWith("existing-run", process.cwd(), {
         includeStopField: false,
       });
@@ -2771,6 +3039,155 @@ describe("cli", () => {
       );
       expect(orchestratorCtor).toHaveBeenCalledTimes(1);
       expect(orchestratorCtor.mock.calls[0]?.[5]).toBe(3);
+    } finally {
+      process.argv = originalArgv;
+      if (originalIsTTY) {
+        Object.defineProperty(process.stdin, "isTTY", originalIsTTY);
+      }
+      stdoutWrite.mockRestore();
+      rmSync(tempDir, { recursive: true, force: true });
+    }
+  });
+
+  it("carries the stored research workflow when updating the prompt on an existing gnhf branch", async () => {
+    const originalArgv = [...process.argv];
+    const stdoutWrite = vi
+      .spyOn(process.stdout, "write")
+      .mockImplementation(() => true);
+    const tempDir = mkdtempSync(join(tmpdir(), "gnhf-cli-test-"));
+    const promptPath = join(tempDir, "PROMPT.md");
+    const orchestratorCtor = vi.fn();
+    const setupRun = vi.fn(() => stubRunInfo);
+    const peekRunMetadata = vi.fn(() => ({
+      ...stubRunInfo,
+      runId: "existing-run",
+      promptPath,
+    }));
+    const commitAll = vi.fn();
+    const ensureCleanWorkingTree = vi.fn();
+    const resumeRun = vi.fn(() => ({
+      ...stubRunInfo,
+      runId: "existing-run",
+      promptPath,
+      workflow: "research" as const,
+    }));
+    const createAgent = vi.fn<(...args: unknown[]) => { name: string }>(() => ({
+      name: "claude",
+    }));
+
+    writeFileSync(promptPath, "existing prompt", "utf-8");
+
+    vi.resetModules();
+    vi.doMock("node:readline", () => ({
+      createInterface: vi.fn(() => ({
+        question: (_question: string, callback: (answer: string) => void) => {
+          callback("o");
+        },
+        close: vi.fn(),
+        once: vi.fn(),
+        off: vi.fn(),
+      })),
+    }));
+    vi.doMock("./core/config.js", () => ({
+      loadConfig: vi.fn(() => ({
+        agentPathOverride: {},
+        agentModel: {},
+        agentArgsOverride: {},
+        effort: "medium",
+        maxConsecutiveFailures: 3,
+        observerEvery: 5,
+        preventSleep: false,
+      })),
+    }));
+    vi.doMock("./core/debug-log.js", () => ({
+      appendDebugLog: vi.fn(),
+      initDebugLog: vi.fn(),
+      serializeError: vi.fn(),
+    }));
+    vi.doMock("./core/git.js", () => ({
+      commitAll,
+      ensureCleanWorkingTree,
+      createBranch: vi.fn(),
+      getHeadCommit: vi.fn(() => "abc123"),
+      getCurrentBranch: vi.fn(() => "gnhf/existing-run"),
+      getRepoRootDir: vi.fn(() => "/repo"),
+      createWorktree: vi.fn(),
+      removeWorktree: vi.fn(),
+    }));
+    vi.doMock("./core/run.js", () => ({
+      setupRun,
+      peekRunMetadata,
+      resumeRun,
+      getLastIterationNumber: vi.fn(() => 3),
+      getFinishedIterationCounts: vi.fn(() => NO_FINISHED_ITERATIONS),
+      getInterruptedIteration: vi.fn(() => null),
+      appendNotes: vi.fn(),
+      writeRunEndState: vi.fn(),
+    }));
+    vi.doMock("./core/agents/factory.js", () => ({ createAgent }));
+    vi.doMock("./core/sleep.js", () => ({
+      startSleepPrevention: vi.fn(),
+    }));
+    vi.doMock("./core/orchestrator.js", () => ({
+      Orchestrator: class MockOrchestrator {
+        constructor(...args: unknown[]) {
+          orchestratorCtor(...args);
+        }
+        start = vi.fn(() => Promise.resolve());
+        stop = vi.fn();
+        on = vi.fn();
+        getState = vi.fn(() => ({
+          status: "completed" as const,
+          currentIteration: 3,
+          totalInputTokens: 0,
+          totalOutputTokens: 0,
+          commitCount: 0,
+          iterations: [],
+          successCount: 0,
+          failCount: 0,
+          consecutiveFailures: 0,
+          startTime: new Date("2026-01-01T00:00:00Z"),
+          waitingUntil: null,
+          lastMessage: null,
+        }));
+      },
+    }));
+    vi.doMock("./renderer.js", () => ({
+      Renderer: class MockRenderer {
+        start = vi.fn();
+        stop = vi.fn();
+        waitUntilExit = vi.fn(() => Promise.resolve());
+      },
+    }));
+
+    process.argv = ["node", "gnhf", "new prompt"];
+    const originalIsTTY = Object.getOwnPropertyDescriptor(
+      process.stdin,
+      "isTTY",
+    );
+    Object.defineProperty(process.stdin, "isTTY", {
+      configurable: true,
+      value: true,
+    });
+
+    try {
+      await import("./cli.js");
+
+      expect(resumeRun).toHaveBeenCalledWith("existing-run", process.cwd(), {
+        includeStopField: false,
+      });
+      expect(setupRun).toHaveBeenCalledWith(
+        "existing-run",
+        "new prompt",
+        "abc123",
+        process.cwd(),
+        { includeStopField: false, workflow: "research" },
+      );
+      expect(createAgent.mock.calls[0]?.[2]).toEqual({
+        includeStopField: false,
+        workflow: "research",
+        effort: "medium",
+      });
     } finally {
       process.argv = originalArgv;
       if (originalIsTTY) {
@@ -2794,12 +3211,12 @@ describe("cli", () => {
     const cliPromise = runCliWithMocks(
       ["ship it"],
       {
-        agent: "claude",
         agentPathOverride: {},
         agentModel: {},
         agentArgsOverride: {},
-        acpRegistryOverrides: {},
+        effort: "medium",
         maxConsecutiveFailures: 3,
+        observerEvery: 5,
         preventSleep: false,
       },
       { orchestratorStart, rendererWaitUntilExit },
@@ -2852,20 +3269,18 @@ describe("cli", () => {
 
     vi.resetModules();
     vi.doMock("./core/config.js", () => ({
-      AGENT_NAMES: TEST_AGENT_NAMES,
-      isAgentSpec: TEST_IS_AGENT_SPEC,
-      redactAgentSpecForLogs: TEST_REDACT_AGENT_SPEC,
       loadConfig: vi.fn(() => ({
-        agent: "claude",
         agentPathOverride: {},
         agentModel: {},
         agentArgsOverride: {},
-        acpRegistryOverrides: {},
+        effort: "medium",
         maxConsecutiveFailures: 3,
+        observerEvery: 5,
         preventSleep: false,
       })),
     }));
     vi.doMock("./core/git.js", () => ({
+      commitAll: vi.fn(),
       ensureCleanWorkingTree: vi.fn(),
       createBranch: vi.fn(),
       getHeadCommit: vi.fn(() => "abc123"),
@@ -2876,7 +3291,9 @@ describe("cli", () => {
       peekRunMetadata: vi.fn(() => stubRunInfo),
       resumeRun: vi.fn(),
       getLastIterationNumber: vi.fn(() => 0),
-      getCompletedIterationCount: vi.fn(() => 0),
+      getFinishedIterationCounts: vi.fn(() => NO_FINISHED_ITERATIONS),
+      getInterruptedIteration: vi.fn(() => null),
+      appendNotes: vi.fn(),
       writeRunEndState: vi.fn(),
     }));
     vi.doMock("./core/agents/factory.js", () => ({
@@ -3002,20 +3419,18 @@ describe("cli", () => {
 
     vi.resetModules();
     vi.doMock("./core/config.js", () => ({
-      AGENT_NAMES: TEST_AGENT_NAMES,
-      isAgentSpec: TEST_IS_AGENT_SPEC,
-      redactAgentSpecForLogs: TEST_REDACT_AGENT_SPEC,
       loadConfig: vi.fn(() => ({
-        agent: "claude",
         agentPathOverride: {},
         agentModel: {},
         agentArgsOverride: {},
-        acpRegistryOverrides: {},
+        effort: "medium",
         maxConsecutiveFailures: 3,
+        observerEvery: 5,
         preventSleep: false,
       })),
     }));
     vi.doMock("./core/git.js", () => ({
+      commitAll: vi.fn(),
       ensureCleanWorkingTree: vi.fn(),
       createBranch: vi.fn(),
       getHeadCommit: vi.fn(() => "abc123"),
@@ -3026,7 +3441,9 @@ describe("cli", () => {
       peekRunMetadata: vi.fn(() => stubRunInfo),
       resumeRun: vi.fn(),
       getLastIterationNumber: vi.fn(() => 0),
-      getCompletedIterationCount: vi.fn(() => 0),
+      getFinishedIterationCounts: vi.fn(() => NO_FINISHED_ITERATIONS),
+      getInterruptedIteration: vi.fn(() => null),
+      appendNotes: vi.fn(),
       writeRunEndState: vi.fn(),
     }));
     vi.doMock("./core/agents/factory.js", () => ({
@@ -3112,12 +3529,12 @@ describe("cli", () => {
     const { consoleErrorCalls } = await runCliWithMocks(
       ["ship it"],
       {
-        agent: "claude",
         agentPathOverride: {},
         agentModel: {},
         agentArgsOverride: {},
-        acpRegistryOverrides: {},
+        effort: "medium",
         maxConsecutiveFailures: 3,
+        observerEvery: 5,
         preventSleep: false,
       },
       {
@@ -3180,20 +3597,18 @@ describe("cli", () => {
 
     vi.resetModules();
     vi.doMock("./core/config.js", () => ({
-      AGENT_NAMES: TEST_AGENT_NAMES,
-      isAgentSpec: TEST_IS_AGENT_SPEC,
-      redactAgentSpecForLogs: TEST_REDACT_AGENT_SPEC,
       loadConfig: vi.fn(() => ({
-        agent: "claude",
         agentPathOverride: {},
         agentModel: {},
         agentArgsOverride: {},
-        acpRegistryOverrides: {},
+        effort: "medium",
         maxConsecutiveFailures: 3,
+        observerEvery: 5,
         preventSleep: false,
       })),
     }));
     vi.doMock("./core/git.js", () => ({
+      commitAll: vi.fn(),
       ensureCleanWorkingTree: vi.fn(),
       createBranch: vi.fn(),
       getHeadCommit: vi.fn(() => "abc123"),
@@ -3204,7 +3619,9 @@ describe("cli", () => {
       peekRunMetadata: vi.fn(() => stubRunInfo),
       resumeRun: vi.fn(),
       getLastIterationNumber: vi.fn(() => 0),
-      getCompletedIterationCount: vi.fn(() => 0),
+      getFinishedIterationCounts: vi.fn(() => NO_FINISHED_ITERATIONS),
+      getInterruptedIteration: vi.fn(() => null),
+      appendNotes: vi.fn(),
       writeRunEndState: vi.fn(),
     }));
     vi.doMock("./core/agents/factory.js", () => ({
@@ -3336,20 +3753,18 @@ describe("cli", () => {
 
     vi.resetModules();
     vi.doMock("./core/config.js", () => ({
-      AGENT_NAMES: TEST_AGENT_NAMES,
-      isAgentSpec: TEST_IS_AGENT_SPEC,
-      redactAgentSpecForLogs: TEST_REDACT_AGENT_SPEC,
       loadConfig: vi.fn(() => ({
-        agent: "claude",
         agentPathOverride: {},
         agentModel: {},
         agentArgsOverride: {},
-        acpRegistryOverrides: {},
+        effort: "medium",
         maxConsecutiveFailures: 3,
+        observerEvery: 5,
         preventSleep: false,
       })),
     }));
     vi.doMock("./core/git.js", () => ({
+      commitAll: vi.fn(),
       ensureCleanWorkingTree: vi.fn(),
       createBranch: vi.fn(),
       getHeadCommit: vi.fn(() => "abc123"),
@@ -3360,7 +3775,9 @@ describe("cli", () => {
       peekRunMetadata: vi.fn(() => stubRunInfo),
       resumeRun: vi.fn(),
       getLastIterationNumber: vi.fn(() => 0),
-      getCompletedIterationCount: vi.fn(() => 0),
+      getFinishedIterationCounts: vi.fn(() => NO_FINISHED_ITERATIONS),
+      getInterruptedIteration: vi.fn(() => null),
+      appendNotes: vi.fn(),
       writeRunEndState: vi.fn(),
     }));
     vi.doMock("./core/agents/factory.js", () => ({
@@ -3453,12 +3870,12 @@ describe("cli", () => {
     await runCliWithMocks(
       ["ship it"],
       {
-        agent: "claude",
         agentPathOverride: {},
         agentModel: {},
         agentArgsOverride: {},
-        acpRegistryOverrides: {},
+        effort: "medium",
         maxConsecutiveFailures: 3,
+        observerEvery: 5,
         preventSleep: false,
       },
       { createBranch },
@@ -3480,12 +3897,12 @@ describe("cli", () => {
     await runCliWithMocks(
       ["ship it", "--worktree"],
       {
-        agent: "claude",
         agentPathOverride: {},
         agentModel: {},
         agentArgsOverride: {},
-        acpRegistryOverrides: {},
+        effort: "medium",
         maxConsecutiveFailures: 3,
+        observerEvery: 5,
         preventSleep: false,
       },
       { createWorktree },
@@ -3498,18 +3915,45 @@ describe("cli", () => {
     expect(createWorktree.mock.calls[1]?.[2]).toBe(`${firstBranch}-1`);
   });
 
+  it("tells a Linux sleep-prevention re-exec which worktree it just created", async () => {
+    const createWorktree = vi.fn();
+    const startSleepPrevention = vi.fn(() =>
+      Promise.resolve({ type: "skipped" as const, reason: "unsupported" }),
+    );
+
+    await runCliWithMocks(
+      ["ship it", "--worktree"],
+      {
+        agentPathOverride: {},
+        agentModel: {},
+        agentArgsOverride: {},
+        effort: "medium",
+        maxConsecutiveFailures: 3,
+        observerEvery: 5,
+        preventSleep: true,
+      },
+      { createWorktree, startSleepPrevention },
+    );
+
+    expect(startSleepPrevention).toHaveBeenCalledWith(expect.any(Array), {
+      reexecEnv: {
+        GNHF_REEXEC_NEW_WORKTREE: createWorktree.mock.calls[0]?.[1],
+      },
+    });
+  });
+
   it("queries git worktrees once when no preserved worktree exists", async () => {
     const listWorktreePaths = vi.fn(() => new Set());
 
     await runCliWithMocks(
       ["ship it", "--worktree"],
       {
-        agent: "claude",
         agentPathOverride: {},
         agentModel: {},
         agentArgsOverride: {},
-        acpRegistryOverrides: {},
+        effort: "medium",
         maxConsecutiveFailures: 3,
+        observerEvery: 5,
         preventSleep: false,
       },
       { listWorktreePaths },
@@ -3524,12 +3968,12 @@ describe("cli", () => {
     await runCliWithMocks(
       ["ship it", "--worktree"],
       {
-        agent: "claude",
         agentPathOverride: {},
         agentModel: {},
         agentArgsOverride: {},
-        acpRegistryOverrides: {},
+        effort: "medium",
         maxConsecutiveFailures: 3,
+        observerEvery: 5,
         preventSleep: false,
       },
       {
@@ -3574,12 +4018,12 @@ describe("cli", () => {
       const cliPromise = runCliWithMocks(
         ["ship it", "--worktree"],
         {
-          agent: "claude",
           agentPathOverride: {},
           agentModel: {},
           agentArgsOverride: {},
-          acpRegistryOverrides: {},
+          effort: "medium",
           maxConsecutiveFailures: 3,
+          observerEvery: 5,
           preventSleep: false,
         },
         {
@@ -3673,12 +4117,12 @@ describe("cli", () => {
       const { orchestratorCtor } = await runCliWithMocks(
         ["ship it", "--worktree"],
         {
-          agent: "claude",
           agentPathOverride: {},
           agentModel: {},
           agentArgsOverride: {},
-          acpRegistryOverrides: {},
+          effort: "medium",
           maxConsecutiveFailures: 3,
+          observerEvery: 5,
           preventSleep: false,
         },
         {
@@ -3730,12 +4174,12 @@ describe("cli", () => {
       const { createAgent, orchestratorCtor } = await runCliWithMocks(
         ["ship it", "--worktree", "--stop-when", ""],
         {
-          agent: "claude",
           agentPathOverride: {},
           agentModel: {},
           agentArgsOverride: {},
-          acpRegistryOverrides: {},
+          effort: "medium",
           maxConsecutiveFailures: 3,
+          observerEvery: 5,
           preventSleep: false,
         },
         {
@@ -3752,16 +4196,137 @@ describe("cli", () => {
         includeStopField: false,
         clearStopWhen: true,
       });
-      expect(createAgent.mock.calls[0]?.[4]).toEqual({
+      expect(createAgent.mock.calls[0]?.[2]).toEqual({
         includeStopField: false,
-        acpRegistryOverrides: {},
+        effort: "medium",
       });
       expect(orchestratorCtor.mock.calls[0]?.[6]).toEqual({
         maxIterations: undefined,
         maxTokens: undefined,
         completedIterations: 0,
+        successCount: 0,
+        failCount: 0,
         stopWhen: undefined,
       });
+    } finally {
+      rmSync(tempDir, { recursive: true, force: true });
+    }
+  });
+
+  it("carries the workflow through a preserved worktree resume", async () => {
+    const tempDir = mkdtempSync(join(tmpdir(), "gnhf-cli-worktree-resume-"));
+    const repoRoot = join(tempDir, "repo");
+    const hash = createHash("sha256")
+      .update("ship it")
+      .digest("hex")
+      .slice(0, 6);
+    const runId = `ship-it-${hash}`;
+    const branch = `gnhf/${runId}`;
+    const worktreePath = join(tempDir, "repo-gnhf-worktrees", runId);
+    mkdirSync(join(worktreePath, ".gnhf", "runs", runId), {
+      recursive: true,
+    });
+
+    const resumeRun = vi.fn(() => ({
+      ...stubRunInfo,
+      runId,
+      runDir: join(worktreePath, ".gnhf", "runs", runId),
+      workflow: "research" as const,
+    }));
+
+    try {
+      const { createAgent, orchestratorCtor } = await runCliWithMocks(
+        ["ship it", "--worktree", "--workflow", "research"],
+        {
+          agentPathOverride: {},
+          agentModel: {},
+          agentArgsOverride: {},
+          effort: "medium",
+          maxConsecutiveFailures: 3,
+          observerEvery: 5,
+          preventSleep: false,
+        },
+        {
+          getRepoRootDir: vi.fn(() => repoRoot),
+          getCurrentBranch: vi.fn((cwd: string) =>
+            cwd === worktreePath ? branch : "main",
+          ),
+          listWorktreePaths: vi.fn(() => new Set([worktreePath])),
+          resumeRun,
+        },
+      );
+
+      expect(resumeRun).toHaveBeenCalledWith(runId, worktreePath, {
+        includeStopField: false,
+        workflow: "research",
+      });
+      expect(createAgent.mock.calls[0]?.[2]).toEqual({
+        includeStopField: false,
+        workflow: "research",
+        effort: "medium",
+      });
+      expect(orchestratorCtor.mock.calls[0]?.[2]).toEqual(
+        expect.objectContaining({ workflow: "research" }),
+      );
+    } finally {
+      rmSync(tempDir, { recursive: true, force: true });
+    }
+  });
+
+  it("keeps the stored research workflow when resuming a preserved worktree without --workflow", async () => {
+    const tempDir = mkdtempSync(join(tmpdir(), "gnhf-cli-worktree-resume-"));
+    const repoRoot = join(tempDir, "repo");
+    const hash = createHash("sha256")
+      .update("ship it")
+      .digest("hex")
+      .slice(0, 6);
+    const runId = `ship-it-${hash}`;
+    const branch = `gnhf/${runId}`;
+    const worktreePath = join(tempDir, "repo-gnhf-worktrees", runId);
+    mkdirSync(join(worktreePath, ".gnhf", "runs", runId), {
+      recursive: true,
+    });
+
+    const resumeRun = vi.fn(() => ({
+      ...stubRunInfo,
+      runId,
+      runDir: join(worktreePath, ".gnhf", "runs", runId),
+      workflow: "research" as const,
+    }));
+
+    try {
+      const { createAgent, orchestratorCtor } = await runCliWithMocks(
+        ["ship it", "--worktree"],
+        {
+          agentPathOverride: {},
+          agentModel: {},
+          agentArgsOverride: {},
+          effort: "medium",
+          maxConsecutiveFailures: 3,
+          observerEvery: 5,
+          preventSleep: false,
+        },
+        {
+          getRepoRootDir: vi.fn(() => repoRoot),
+          getCurrentBranch: vi.fn((cwd: string) =>
+            cwd === worktreePath ? branch : "main",
+          ),
+          listWorktreePaths: vi.fn(() => new Set([worktreePath])),
+          resumeRun,
+        },
+      );
+
+      expect(resumeRun).toHaveBeenCalledWith(runId, worktreePath, {
+        includeStopField: false,
+      });
+      expect(createAgent.mock.calls[0]?.[2]).toEqual({
+        includeStopField: false,
+        workflow: "research",
+        effort: "medium",
+      });
+      expect(orchestratorCtor.mock.calls[0]?.[2]).toEqual(
+        expect.objectContaining({ workflow: "research" }),
+      );
     } finally {
       rmSync(tempDir, { recursive: true, force: true });
     }
@@ -3796,12 +4361,12 @@ describe("cli", () => {
       const { orchestratorCtor } = await runCliWithMocks(
         ["ship it", "--worktree"],
         {
-          agent: "claude",
           agentPathOverride: {},
           agentModel: {},
           agentArgsOverride: {},
-          acpRegistryOverrides: {},
+          effort: "medium",
           maxConsecutiveFailures: 3,
+          observerEvery: 5,
           preventSleep: false,
         },
         {
@@ -3853,12 +4418,12 @@ describe("cli", () => {
       const { createAgent, orchestratorCtor } = await runCliWithMocks(
         ["ship it", "--worktree"],
         {
-          agent: "claude",
           agentPathOverride: {},
           agentModel: {},
           agentArgsOverride: {},
-          acpRegistryOverrides: {},
+          effort: "medium",
           maxConsecutiveFailures: 3,
+          observerEvery: 5,
           preventSleep: false,
           commitMessage: CONVENTIONAL_COMMIT_MESSAGE,
         },
@@ -3872,9 +4437,9 @@ describe("cli", () => {
         },
       );
 
-      expect(createAgent.mock.calls[0]?.[4]).toEqual({
+      expect(createAgent.mock.calls[0]?.[2]).toEqual({
         includeStopField: false,
-        acpRegistryOverrides: {},
+        effort: "medium",
       });
       expect(orchestratorCtor.mock.calls[0]?.[0]).toEqual(
         expect.objectContaining({ commitMessage: undefined }),

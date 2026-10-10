@@ -45,17 +45,8 @@ describe("renderTitle", () => {
   });
 
   it("renders the agent name in the eyebrow", () => {
-    const lines = renderTitle("rovodev").map(stripAnsi);
-    expect(lines[0]).toContain("g n h f");
-    expect(lines[0]).toContain("·");
-    expect(lines[0]).toContain("r o v o d e v");
-  });
-
-  it("renders an acp:<target> spec as two dot-separated segments", () => {
-    const lines = renderTitle("acp:claude").map(stripAnsi);
-    expect(lines[0]).toContain("g n h f  ·  a c p  ·  c l a u d e");
-    // The colon should not appear as a letter-spaced character.
-    expect(lines[0]).not.toContain("a c p :");
+    const lines = renderTitle("claude").map(stripAnsi);
+    expect(lines[0]).toContain("g n h f  ·  c l a u d e");
   });
 
   it("renders all three lines of ASCII art", () => {
@@ -851,6 +842,71 @@ describe("buildContentCells adaptive height", () => {
     expect(text).toContain("reading files");
     expect(text).toContain("00:01:00");
     expect(rows).toHaveLength(22);
+  });
+
+  const researchStats = {
+    executed: 3,
+    sourceRead: 0,
+    reasoningOnly: 1,
+    noEvidence: 0,
+    goalsStale: 2,
+    reasoningStreak: 0,
+    openContracts: 4,
+    missingBoundary: 1,
+  };
+
+  it("shows research stats on the row below the stats line", () => {
+    const rows = buildContentCells(
+      "my prompt",
+      "claude",
+      { ...state, research: researchStats },
+      "00:01:00",
+      0,
+    );
+    const lines = rows.map(rowToString).map(stripAnsi);
+    const statsIndex = lines.findIndex((line) => line.includes("00:01:00"));
+    expect(lines[statsIndex + 1]!.trim()).toBe(
+      "exec 3 · reason 1 · stale 2 · contracts 4 · no boundary 1",
+    );
+    expect(rows).toHaveLength(23);
+  });
+
+  it("drops separator padding when large research counts do not fit", () => {
+    const text = toText(
+      buildContentCells(
+        "my prompt",
+        "claude",
+        {
+          ...state,
+          research: {
+            ...researchStats,
+            executed: 120,
+            reasoningOnly: 400,
+            goalsStale: 120,
+            openContracts: 3000,
+            missingBoundary: 2000,
+          },
+        },
+        "00:01:00",
+        0,
+      ),
+    );
+    expect(text).toContain(
+      "exec 120·reason 400·stale 120·contracts 3000·no boundary 2000",
+    );
+  });
+
+  it("drops the research row before the stats row when height is short", () => {
+    const rows = buildContentCells(
+      "my prompt",
+      "claude",
+      { ...state, research: researchStats, iterations: [] },
+      "00:01:00",
+      0,
+      1,
+    );
+    expect(rows).toHaveLength(1);
+    expect(stripAnsi(rowToString(rows[0]!))).toContain("00:01:00");
   });
 
   it("shows finished iterations between the timer and token counts", () => {
