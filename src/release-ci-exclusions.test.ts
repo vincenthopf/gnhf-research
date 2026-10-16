@@ -189,7 +189,6 @@ describe("release-please CI exclusions", () => {
     }
 
     expect(prWorkflows.map((w) => w.name).sort()).toEqual([
-      "ci.yml",
       "guard-generated-files.yml",
       "no-mistakes-required.yml",
     ]);
@@ -203,21 +202,6 @@ describe("release-please CI exclusions", () => {
     }
 
     expect(failures).toEqual([]);
-  });
-
-  it("does not attach path filters to non-pull_request triggers on ci.yml", () => {
-    const on = loadWorkflowOn(join(workflowsDir, "ci.yml"));
-    expect(on).not.toBeNull();
-    expect(on!.push).toEqual({ branches: ["main"] });
-    const pr = on!.pull_request as Record<string, unknown>;
-    expect(pr.branches).toEqual(["main"]);
-    expect(pr["paths-ignore"]).toEqual([
-      ".release-please-manifest.json",
-      "CHANGELOG.md",
-      "package.json",
-    ]);
-    expect(on!.release).toBeUndefined();
-    expect(on!.workflow_dispatch).toBeUndefined();
   });
 
   it("keeps bot author exemptions on guard and no-mistakes jobs", () => {

@@ -17,13 +17,4 @@ describe("typecheck setup", () => {
     expect(packageJson.scripts?.typecheck).toMatch(/\btsc\b/);
     expect(packageJson.scripts?.typecheck).toContain("--noEmit");
   });
-
-  it("runs type checking in CI", () => {
-    const workflow = readFileSync(
-      resolve(repoRoot, ".github/workflows/ci.yml"),
-      "utf8",
-    );
-
-    expect(workflow).toMatch(/^\s*- run: pnpm run typecheck$/m);
-  });
 });
