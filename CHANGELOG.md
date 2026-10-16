@@ -1,5 +1,39 @@
 # Changelog
 
+## [0.2.0](https://github.com/vincenthopf/gnhf-research/compare/gnhf-v0.1.51...gnhf-v0.2.0) (2026-10-16)
+
+
+### ⚠ BREAKING CHANGES
+
+* the --agent flag is removed. A config file with a non-claude agent key, agentModel/agentArgsOverride/agentPathOverride entries for other agents, or acpRegistryOverrides now fails to load with an error naming the key to remove. agent: claude is still accepted, and the bootstrapped config no longer writes an agent key.
+
+### Features
+
+* add effort setting with opus 5.5 medium default ([cd2338a](https://github.com/vincenthopf/gnhf-research/commit/cd2338aa21dbcf830b9e1c5d27b0086465af978d))
+* **config:** Added `agents` and `appendSystemPrompt` config keys, validated at startup and passed to claude as `--agents` and `--append-system-prompt-file`. The suite now passes when run inside a gnhf run. Also opened draft PR [#1](https://github.com/vincenthopf/gnhf-research/issues/1) and Linear issue VINCE-422. ([808736c](https://github.com/vincenthopf/gnhf-research/commit/808736c0a2dc6df8e98364e3c019b0365f388b80))
+* **limits:** Runs now know when they are ending: the last `--max-iterations` iteration is told to post its summary, and the new `--until <time>` deadline is stated in every prompt and triggers one wrap-up iteration before gnhf stops. ([ed5ba7d](https://github.com/vincenthopf/gnhf-research/commit/ed5ba7d6e62a2fd3ea9886832def53e6cff07d04))
+* **limits:** Runs that keep making no progress now stop with a summary. After `maxConsecutiveFailures` iterations in a row that report failure or leave nothing to commit, gnhf runs one wrap-up iteration and then stops with the distinct reason `no progress in <n> consecutive iterations`. ([2147089](https://github.com/vincenthopf/gnhf-research/commit/214708968c5f3dead11a2be2d8e69c76e9078108))
+* research harness for gnhf ([268e658](https://github.com/vincenthopf/gnhf-research/commit/268e658cbc17058d2bef9eb680d35b08e242fe06))
+* **research:** Added `--workflow research`. Each prompt now carries the research continuation cycle, and claude must report `evidence_origin`, `goals_changed`, `contracts_run` and `boundary`. gnhf records these in notes.md and the log, and a resumed run keeps research mode. Real claude accepted the new schema. ([5f2219f](https://github.com/vincenthopf/gnhf-research/commit/5f2219ff5b71b74a4a04fff25b04e919a8babeac))
+* **research:** Added the research ledger validator: `records.jsonl` at `.gnhf/runs/<id>/ledger/`, or a path set with `--ledger`, is checked against `validated.jsonl` before each prompt and after each iteration that returns a result. A rejected ledger is saved to a file and the checked copy restored, and the reason reaches the next prompt. All six skeptic findings are fixed, and 801 tests pass. ([92ca4e0](https://github.com/vincenthopf/gnhf-research/commit/92ca4e0180433fee49f697d13be3d2cacf2e7834))
+* **research:** Built feature 3: research mode now shows stats in the TUI and the exit summary, adds a non-stopping stall signal with a Change Approach prompt section, and runs an observer pass every observerEvery iterations. 847 tests pass, and build, typecheck, lint and format:check are clean. ([f1bc859](https://github.com/vincenthopf/gnhf-research/commit/f1bc859e370d89658240a34953dfe78b90cbc030))
+* **resume:** A run killed mid-iteration now resumes cleanly: gnhf commits the leftover changes as a wip commit, records an [INTERRUPTED] note, and continues at the next iteration in all resume modes. ([72db914](https://github.com/vincenthopf/gnhf-research/commit/72db91465d75c6b6e64658e830180336e1f8760f))
+
+
+### Bug Fixes
+
+* **git:** Run branches are now created without an upstream, and `--push` always pushes to a same-named branch on the push remote. A branch that tracks origin/main can no longer fail its first push or push to main. ([b4d30f2](https://github.com/vincenthopf/gnhf-research/commit/b4d30f272f6707c68354a1ea9803a9294df38549))
+* **research:** Fixed the research row so iterations whose git commit failed keep their evidence type: a 3-iteration run with no git identity now shows `reason 3 · goals stale 3` instead of `reason 0`. Full check passes with 857 tests passed and 2 skipped. ([8e6ef41](https://github.com/vincenthopf/gnhf-research/commit/8e6ef414e242cb9f1c809cc186c04ae3bb3b16e1))
+* **research:** Ran the skeptic pass on feature 3 and fixed its findings 1 to 4 and 6. Failed and ledger-rejected iterations no longer close contracts or reset the goals-stale count, the no-boundary count now covers only claim records, and the observer event is logged once per iteration. 855 tests pass, and build, typecheck, lint and format:check are clean. ([134bebe](https://github.com/vincenthopf/gnhf-research/commit/134bebeb2219b0e1b8f0f96f898ead2387029232))
+* **research:** Verified research mode end to end with real claude. Over 4 iterations claude wrote valid ledger records, ran contracts and appended reframes, and the exit summary counts matched hand counts. Also fixed the before-iteration ledger rejection message, which wrongly blamed an interrupted iteration for a manual edit. ([84c8a3c](https://github.com/vincenthopf/gnhf-research/commit/84c8a3c7f503e72a760e44809455f91ed1d916ed))
+* **summary:** Fixed the resumed-run exit summary. Good and failed counts are now seeded from gnhf.log, so a run resumed to iteration 6 prints `6 total 6 good 0 failed` instead of `6 total 1 good 0 failed`. 856 unit and 65 e2e tests pass, and build, typecheck, lint and format are clean. ([8c73db0](https://github.com/vincenthopf/gnhf-research/commit/8c73db0de301337b0ec7d4599ff816faef7e2f24))
+* **worktree:** remove an empty new worktree after Linux sleep re-exec ([ef36f64](https://github.com/vincenthopf/gnhf-research/commit/ef36f64c4a579d8392f24ec08c257274dfa0eacb))
+
+
+### Code Refactoring
+
+* remove non-claude agents ([df1630a](https://github.com/vincenthopf/gnhf-research/commit/df1630af77519c54e2d8392caf4af030ec40fd10))
+
 ## [0.1.51](https://github.com/kunchenguid/gnhf/compare/gnhf-v0.1.50...gnhf-v0.1.51) (2026-10-03)
 
 
